@@ -483,6 +483,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=0.9993,
     )
     parser.add_argument(
+        "--lbfgs_steps",
+        help="Number of LBFGS iterations to do at the end of training"
+        type=int,
+        default=10,
+    )
+    parser.add_argument(
         "--swa",
         help="use Stochastic Weight Averaging, which decreases the learning rate and increases the energy weight at the end of the training to help converge them",
         action="store_true",

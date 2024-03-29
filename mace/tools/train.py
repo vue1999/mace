@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch_ema import ExponentialMovingAverage
 from torchmetrics import Metric
+from torchmin import Minimizer
 
 from . import torch_geometric
 from .checkpoint import CheckpointHandler, CheckpointState
@@ -119,6 +120,7 @@ def train(
     output_args: Dict[str, bool],
     device: torch.device,
     log_errors: str,
+    lbfgs_steps: int = 0,
     swa: Optional[SWAContainer] = None,
     ema: Optional[ExponentialMovingAverage] = None,
     max_grad_norm: Optional[float] = 10.0,
@@ -264,6 +266,26 @@ def train(
         if distributed:
             torch.distributed.barrier()
         epoch += 1
+        
+    for _ in range(lbfgs_steps):
+        if distributed:
+            train_sampler.set_epoch(epoch)
+
+        train_one_epoch_lbfgs(
+            model=model,
+            loss_fn=loss_fn,
+            data_loader=train_loader,
+            epoch=epoch,
+            output_args=output_args,
+            max_grad_norm=max_grad_norm,
+            ema=ema,
+            logger=logger,
+            device=device,
+            distributed_model=distributed_model,
+            rank=rank,
+        )
+        if distributed:
+            torch.distributed.barrier()
 
     logging.info("Training complete")
 
@@ -371,6 +393,81 @@ def evaluate(
         param.requires_grad = True
 
     return avg_loss, aux
+
+
+def train_one_epoch_lbfgs(
+    model: torch.nn.Module,
+    loss_fn: torch.nn.Module,
+    data_loader: DataLoader,
+    epoch: int,
+    output_args: Dict[str, bool],
+    max_grad_norm: Optional[float],
+    ema: Optional[ExponentialMovingAverage],
+    logger: MetricsLogger,
+    device: torch.device,
+    distributed_model: Optional[DistributedDataParallel] = None,
+    rank: Optional[int] = 0,
+) -> None:
+    model_to_train = model if distributed_model is None else distributed_model
+    for batch in data_loader:
+        _, opt_metrics = take_step_lbfgs(
+            model=model_to_train,
+            loss_fn=loss_fn,
+            batch=batch,
+            ema=ema,
+            output_args=output_args,
+            max_grad_norm=max_grad_norm,
+            device=device,
+        )
+        opt_metrics["mode"] = "opt"
+        opt_metrics["epoch"] = epoch
+        if rank == 0:
+            logger.log(opt_metrics)
+
+
+def take_step_lbfgs(
+    model: torch.nn.Module,
+    loss_fn: torch.nn.Module,
+    batch: torch_geometric.batch.Batch,
+    ema: Optional[ExponentialMovingAverage],
+    output_args: Dict[str, bool],
+    max_grad_norm: Optional[float],
+    device: torch.device,
+) -> Tuple[float, Dict[str, Any]]:
+    batch_ = batch.to(device)
+    optimizer = Minimizer(model.parameters(), method='l-bfgs')
+
+    def closure():
+        optimizer.zero_grad()
+        batch_dict = batch_.to_dict()
+        output = model(
+            batch_dict,
+            training=True,
+            compute_force=output_args["forces"],
+            compute_virials=output_args["virials"],
+            compute_stress=output_args["stress"],
+        )
+        loss = loss_fn(pred=output, ref=batch_)
+        loss.backward()
+        return loss
+
+    start_time = time.time()
+    optimizer.step(closure)
+    loss = closure()
+    print("loss", loss)
+    
+    if max_grad_norm is not None and loss.requires_grad:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+
+    if ema is not None:
+        ema.update()
+
+    loss_dict = {
+        "loss": to_numpy(loss),
+        "time": time.time() - start_time,
+    }
+
+    return loss, loss_dict
 
 
 class MACELoss(Metric):
