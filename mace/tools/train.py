@@ -448,7 +448,6 @@ def take_step_lbfgs(
             compute_stress=output_args["stress"],
         )
         loss = loss_fn(pred=output, ref=batch_)
-        loss.backward()
         return loss
 
     start_time = time.time()
