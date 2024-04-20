@@ -453,7 +453,6 @@ def take_step_lbfgs(
     start_time = time.time()
     optimizer.step(closure)
     loss = closure()
-    print("loss", loss)
     
     if max_grad_norm is not None and loss.requires_grad:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
