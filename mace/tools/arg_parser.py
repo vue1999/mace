@@ -484,7 +484,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--lbfgs_steps",
-        help="Number of LBFGS iterations to do at the end of training"
+        help="Number of LBFGS iterations to do at the end of training",
         type=int,
         default=10,
     )
