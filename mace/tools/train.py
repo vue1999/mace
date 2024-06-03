@@ -435,7 +435,7 @@ def take_step_lbfgs(
     device: torch.device,
 ) -> Tuple[float, Dict[str, Any]]:
     batch_ = batch.to(device)
-    optimizer = Minimizer(model.parameters(), method='l-bfgs')
+    optimizer = Minimizer(model.parameters(), method='l-bfgs', tol=1e-03)
 
     def closure():
         optimizer.zero_grad()
