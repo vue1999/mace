@@ -483,10 +483,10 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=0.9993,
     )
     parser.add_argument(
-        "--lbfgs_steps",
-        help="Number of LBFGS iterations to do at the end of training",
-        type=int,
-        default=10,
+        "--lbfgs",
+        help="use LBFGS optimisation at the end of training",
+        action="store_true",
+        default=False,
     )
     parser.add_argument(
         "--swa",

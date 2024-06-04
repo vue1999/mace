@@ -621,9 +621,10 @@ def main() -> None:
             loss_fn=loss_fn_energy,
         )
         
-    if args.lbfgs_steps:
-        logging.info("Adding LBFGS steps at the end of training")
-        lbfgs_steps = args.lbfgs_steps
+    lbfgs: bool = False
+    if args.lbfgs:
+        logging.info("Adding LBFGS step at the end of training")
+        lbfgs = True
 
     checkpoint_handler = tools.CheckpointHandler(
         directory=args.checkpoints_dir,
@@ -698,7 +699,7 @@ def main() -> None:
         save_all_checkpoints=args.save_all_checkpoints,
         output_args=output_args,
         device=device,
-        lbfgs_steps=lbfgs_steps,
+        lbfgs=lbfgs,
         swa=swa,
         ema=ema,
         max_grad_norm=args.clip_grad,

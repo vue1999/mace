@@ -120,7 +120,7 @@ def train(
     output_args: Dict[str, bool],
     device: torch.device,
     log_errors: str,
-    lbfgs_steps: int = 0,
+    lbfgs: bool = False,
     swa: Optional[SWAContainer] = None,
     ema: Optional[ExponentialMovingAverage] = None,
     max_grad_norm: Optional[float] = 10.0,
@@ -267,7 +267,7 @@ def train(
             torch.distributed.barrier()
         epoch += 1
         
-    for _ in range(lbfgs_steps):
+    if lbfgs:
         if distributed:
             train_sampler.set_epoch(epoch)
 
