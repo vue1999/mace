@@ -284,8 +284,19 @@ def train(
             distributed_model=distributed_model,
             rank=rank,
         )
+
         if distributed:
             torch.distributed.barrier()
+
+        param_context = (
+            ema.average_parameters() if ema is not None else nullcontext()
+        )
+        with param_context:
+            checkpoint_handler.save(
+            state=CheckpointState(model, optimizer, lr_scheduler),
+            epochs=epoch,
+            keep_last=keep_last,
+        )
 
     logging.info("Training complete")
 
@@ -435,7 +446,7 @@ def take_step_lbfgs(
     device: torch.device,
 ) -> Tuple[float, Dict[str, Any]]:
     batch_ = batch.to(device)
-    optimizer = Minimizer(model.parameters(), method='l-bfgs', tol=1e-03)
+    optimizer = Minimizer(model.parameters(), method='l-bfgs', tol=1e-05)
 
     def closure():
         optimizer.zero_grad()
