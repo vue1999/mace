@@ -117,7 +117,7 @@ def config_from_atoms(
 
     energy = atoms.info.get(energy_key, None)  # eV
     forces = atoms.arrays.get(forces_key, None)  # eV / Ang
-    stress = atoms.info.get(stress_key, None)  # eV / Ang
+    stress = atoms.info.get(stress_key, None)  # eV / Ang ^ 3
     virials = atoms.info.get(virials_key, None)
     dipole = atoms.info.get(dipole_key, None)  # Debye
     # Charges default to 0 instead of None if not found
@@ -202,7 +202,38 @@ def load_from_xyz(
     keep_isolated_atoms: bool = False,
 ) -> Tuple[Dict[int, float], Configurations]:
     atoms_list = ase.io.read(file_path, index=":")
-
+    if energy_key == "energy":
+        logging.info(
+            "Since ASE version 3.23.0b1, using energy_key 'energy' is no longer safe when communicating between MACE and ASE. We recommend using a different key, rewriting energies to 'REF_energy'. You need to use --energy_key='REF_energy', to tell the key name chosen."
+        )
+        energy_key = "REF_energy"
+        for atoms in atoms_list:
+            try:
+                atoms.info["REF_energy"] = atoms.get_potential_energy()
+            except Exception as e:  # pylint: disable=W0703
+                logging.warning(f"Failed to extract energy: {e}")
+                atoms.info["REF_energy"] = None
+    if forces_key == "forces":
+        logging.info(
+            "Since ASE version 3.23.0b1, using forces_key 'forces' is no longer safe when communicating between MACE and ASE. We recommend using a different key, rewriting energies to 'REF_forces'. You need to use --forces_key='REF_forces', to tell the key name chosen."
+        )
+        forces_key = "REF_forces"
+        for atoms in atoms_list:
+            try:
+                atoms.arrays["REF_forces"] = atoms.get_forces()
+            except Exception as e:  # pylint: disable=W0703
+                logging.warning(f"Failed to extract forces: {e}")
+                atoms.arrays["REF_forces"] = None
+    if stress_key == "stress":
+        logging.info(
+            "Since ASE version 3.23.0b1, using stress_key 'stress' is no longer safe when communicating between MACE and ASE. We recommend using a different key, rewriting energies to 'REF_stress'. You need to use --stress_key='REF_stress', to tell the key name chosen."
+        )
+        stress_key = "REF_stress"
+        for atoms in atoms_list:
+            try:
+                atoms.info["REF_stress"] = atoms.get_stress()
+            except Exception as e:  # pylint: disable=W0703
+                atoms.info["REF_stress"] = None
     if not isinstance(atoms_list, list):
         atoms_list = [atoms_list]
 

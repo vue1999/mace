@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from e3nn.util.jit import compile_mode
 
+from mace.tools.compile import simplify_if_compile
 from mace.tools.scatter import scatter_sum
 
 
@@ -188,9 +189,9 @@ class ZBLBasis(torch.nn.Module):
     ) -> torch.Tensor:
         sender = edge_index[0]
         receiver = edge_index[1]
-        node_atomic_numbers = atomic_numbers[
-            torch.where(node_attrs.int() == 1)[1]
-        ].unsqueeze(-1)
+        node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
+            -1
+        )
         Z_u = node_atomic_numbers[sender]
         Z_v = node_atomic_numbers[receiver]
         a = (
@@ -221,13 +222,18 @@ class ZBLBasis(torch.nn.Module):
         return f"{self.__class__.__name__}(r_max={self.r_max}, c={self.c})"
 
 
+@compile_mode("script")
 class AgnesiTransform(torch.nn.Module):
     """
     Agnesi transform see ACEpotentials.jl, JCP 2023, p. 160
     """
 
     def __init__(
-        self, q: float = 0.9183, p: float = 4.5791, a: float = 1.0805, trainable=False
+        self,
+        q: float = 0.9183,
+        p: float = 4.5791,
+        a: float = 1.0805,
+        trainable=False,
     ):
         super().__init__()
         self.register_buffer("q", torch.tensor(q, dtype=torch.get_default_dtype()))
@@ -254,12 +260,12 @@ class AgnesiTransform(torch.nn.Module):
     ) -> torch.Tensor:
         sender = edge_index[0]
         receiver = edge_index[1]
-        node_atomic_numbers = atomic_numbers[
-            torch.where(node_attrs.int() == 1)[1]
-        ].unsqueeze(-1)
+        node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
+            -1
+        )
         Z_u = node_atomic_numbers[sender]
         Z_v = node_atomic_numbers[receiver]
-        r_0 = (self.covalent_radii[Z_u] + self.covalent_radii[Z_v]) / 2
+        r_0 = 0.5 * (self.covalent_radii[Z_u] + self.covalent_radii[Z_v])
         return (
             1 + (self.a * ((x / r_0) ** self.q) / (1 + (x / r_0) ** (self.q - self.p)))
         ) ** (-1)
@@ -268,6 +274,8 @@ class AgnesiTransform(torch.nn.Module):
         return f"{self.__class__.__name__}(a={self.a}, q={self.q}, p={self.p})"
 
 
+@simplify_if_compile
+@compile_mode("script")
 class SoftTransform(torch.nn.Module):
     """
     Soft Transform
@@ -298,9 +306,9 @@ class SoftTransform(torch.nn.Module):
     ) -> torch.Tensor:
         sender = edge_index[0]
         receiver = edge_index[1]
-        node_atomic_numbers = atomic_numbers[
-            torch.where(node_attrs.int() == 1)[1]
-        ].unsqueeze(-1)
+        node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
+            -1
+        )
         Z_u = node_atomic_numbers[sender]
         Z_v = node_atomic_numbers[receiver]
         r_0 = (self.covalent_radii[Z_u] + self.covalent_radii[Z_v]) / 4
