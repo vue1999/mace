@@ -6,6 +6,7 @@ from pathlib import Path
 import ase.io
 import numpy as np
 import pytest
+import torch
 from ase import build
 from ase.atoms import Atoms
 from ase.calculators.test import gradient_test
@@ -75,6 +76,7 @@ def trained_model_fixture(tmp_path_factory, fitting_configs):
         "energy_key": "REF_energy",
         "forces_key": "REF_forces",
         "stress_key": "REF_stress",
+        "eval_interval": 2,
     }
 
     tmp_path = tmp_path_factory.mktemp("run_")
@@ -109,7 +111,7 @@ def trained_model_fixture(tmp_path_factory, fitting_configs):
 
     assert p.returncode == 0
 
-    return MACECalculator(tmp_path / "MACE.model", device="cpu")
+    return MACECalculator(model_paths=tmp_path / "MACE.model", device="cpu")
 
 
 @pytest.fixture(scope="module", name="trained_equivariant_model")
@@ -137,6 +139,7 @@ def trained_model_equivariant_fixture(tmp_path_factory, fitting_configs):
         "energy_key": "REF_energy",
         "forces_key": "REF_forces",
         "stress_key": "REF_stress",
+        "eval_interval": 2,
     }
 
     tmp_path = tmp_path_factory.mktemp("run_")
@@ -171,7 +174,7 @@ def trained_model_equivariant_fixture(tmp_path_factory, fitting_configs):
 
     assert p.returncode == 0
 
-    return MACECalculator(tmp_path / "MACE.model", device="cpu")
+    return MACECalculator(model_paths=tmp_path / "MACE.model", device="cpu")
 
 
 @pytest.fixture(scope="module", name="trained_dipole_model")
@@ -200,6 +203,7 @@ def trained_dipole_fixture(tmp_path_factory, fitting_configs):
         "stress_key": "",
         "dipole_key": "REF_dipole",
         "error_table": "DipoleRMSE",
+        "eval_interval": 2,
     }
 
     tmp_path = tmp_path_factory.mktemp("run_")
@@ -235,7 +239,7 @@ def trained_dipole_fixture(tmp_path_factory, fitting_configs):
     assert p.returncode == 0
 
     return MACECalculator(
-        tmp_path / "MACE.model", device="cpu", model_type="DipoleMACE"
+        model_paths=tmp_path / "MACE.model", device="cpu", model_type="DipoleMACE"
     )
 
 
@@ -265,6 +269,7 @@ def trained_energy_dipole_fixture(tmp_path_factory, fitting_configs):
         "stress_key": "",
         "dipole_key": "REF_dipole",
         "error_table": "EnergyDipoleRMSE",
+        "eval_interval": 2,
     }
 
     tmp_path = tmp_path_factory.mktemp("run_")
@@ -300,7 +305,7 @@ def trained_energy_dipole_fixture(tmp_path_factory, fitting_configs):
     assert p.returncode == 0
 
     return MACECalculator(
-        tmp_path / "MACE.model", device="cpu", model_type="EnergyDipoleMACE"
+        model_paths=tmp_path / "MACE.model", device="cpu", model_type="EnergyDipoleMACE"
     )
 
 
@@ -332,6 +337,7 @@ def trained_committee_fixture(tmp_path_factory, fitting_configs):
             "energy_key": "REF_energy",
             "forces_key": "REF_forces",
             "stress_key": "REF_stress",
+            "eval_interval": 2,
         }
 
         tmp_path = tmp_path_factory.mktemp(f"run{seed}_")
@@ -368,7 +374,7 @@ def trained_committee_fixture(tmp_path_factory, fitting_configs):
 
         _model_paths.append(tmp_path / f"MACE{seed}.model")
 
-    return MACECalculator(_model_paths, device="cpu")
+    return MACECalculator(model_paths=_model_paths, device="cpu")
 
 
 def test_calculator_node_energy(fitting_configs, trained_model):
@@ -376,12 +382,12 @@ def test_calculator_node_energy(fitting_configs, trained_model):
         trained_model.calculate(at)
         node_energies = trained_model.results["node_energy"]
         batch = trained_model._atoms_to_batch(at)  # pylint: disable=protected-access
+        node_heads = batch["head"][batch["batch"]]
+        num_atoms_arange = torch.arange(batch["positions"].shape[0])
         node_e0 = (
-            trained_model.models[0]
-            .atomic_energies_fn(batch["node_attrs"])
-            .detach()
-            .numpy()
+            trained_model.models[0].atomic_energies_fn(batch["node_attrs"]).detach()
         )
+        node_e0 = node_e0[num_atoms_arange, node_heads].cpu().numpy()
         energy_via_nodes = np.sum(node_energies + node_e0)
         energy = trained_model.results["energy"]
         np.testing.assert_allclose(energy, energy_via_nodes, atol=1e-6)
@@ -424,6 +430,20 @@ def test_calculator_committee(fitting_configs, trained_committee):
     assert np.allclose(E, np.mean(energies))
     assert np.allclose(energies_var, np.var(energies))
     assert forces_var.shape == at.calc.results["forces"].shape
+
+
+def test_calculator_from_model(fitting_configs, trained_committee):
+    # test single model
+    test_calculator_forces(
+        fitting_configs,
+        trained_model=MACECalculator(models=trained_committee.models[0], device="cpu"),
+    )
+
+    # test committee model
+    test_calculator_committee(
+        fitting_configs,
+        trained_committee=MACECalculator(models=trained_committee.models, device="cpu"),
+    )
 
 
 def test_calculator_dipole(fitting_configs, trained_dipole_model):

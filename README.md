@@ -13,13 +13,12 @@
   - [About MACE](#about-mace)
   - [Documentation](#documentation)
   - [Installation](#installation)
-    - [pip installation](#pip-installation)
-    - [conda installation](#conda-installation)
-    - [pip installation from source](#pip-installation-from-source)
+    - [pip installation](#installation-from-pypi)
+    - [pip installation from source](#installation-from-source)
   - [Usage](#usage)
     - [Training](#training)
     - [Evaluation](#evaluation)
-  - [Tutorial](#tutorial)
+  - [Tutorials](#tutorials)
   - [Weights and Biases for experiment tracking](#weights-and-biases-for-experiment-tracking)
   - [Pretrained Foundation Models](#pretrained-foundation-models)
     - [MACE-MP: Materials Project Force Fields](#mace-mp-materials-project-force-fields)
@@ -50,64 +49,33 @@ A partial documentation is available at: https://mace-docs.readthedocs.io
 
 ## Installation
 
-Requirements:
+### 1. Requirements:
 
-- Python >= 3.7
-- [PyTorch](https://pytorch.org/) >= 1.12 **(training with float64 is not supported with PyTorch 2.1 but is supported with 2.2 and later.)**.
+- Python >= 3.7  (for openMM, use Python = 3.9)
+- [PyTorch](https://pytorch.org/) >= 1.12 **(training with float64 is not supported with PyTorch 2.1 but is supported with 2.2 and later, Pytorch 2.4.1 is not supported)**
 
-(for openMM, use Python = 3.9)
+**Make sure to install PyTorch.** Please refer to the [official PyTorch installation](https://pytorch.org/get-started/locally/) for the installation instructions. Select the appropriate options for your system.
 
-### pip installation
+### Installation from PyPI
 This is the recommended way to install MACE. 
-
-**First, make sure to install PyTorch.** Please refer to the [official PyTorch installation](https://pytorch.org/get-started/locally/) for the installation instructions. Select the appropriate options for your system. For GPU installation, make sure to select pip + the appropriate CUDA version for your system. For recent GPUs, the latest cuda version is usually the best choice.
-
-To install via `pip`, follow the steps below:
 
 ```sh
 pip install --upgrade pip
 pip install mace-torch
 ```
-
-For CPU or MPS (Apple Silicon) installation, use `pip install torch torchvision torchaudio` instead.
-
-### conda installation from source
-
-To install from source using `conda`, follow the steps below:
-```sh
-# Create a virtual environment and activate it
-conda create --name mace_env
-conda activate mace_env
-
-# Install PyTorch
-conda install pytorch torchvision torchaudio pytorch-cuda=11.6 -c pytorch -c nvidia
-
-# (optional) Install MACE's dependencies from Conda as well
-conda install numpy scipy matplotlib ase opt_einsum prettytable pandas e3nn
-
-# Clone and install MACE (and all required packages)
-git clone https://github.com/ACEsuit/mace.git
-pip install ./mace
-```
-For the Pytorch version, use the appropriate version for your CUDA version.
-### pip installation from source
-
-To install via `pip`, follow the steps below:
-
-```sh
-# Create a virtual environment and activate it
-python -m venv mace-venv
-source mace-venv/bin/activate
-
-# Install PyTorch (for example, for CUDA 11.6 [cu116])
-pip3 install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
-
-# Clone and install MACE (and all required packages)
-git clone https://github.com/ACEsuit/mace.git
-pip install ./mace
-```
-
 **Note:** The homonymous package on [PyPI](https://pypi.org/project/MACE/) has nothing to do with this one.
+
+
+### Installation from source
+
+
+```sh
+git clone https://github.com/ACEsuit/mace.git
+pip install ./mace
+```
+
+
+
 
 ## Usage
 
@@ -193,11 +161,15 @@ mace_eval_configs \
     --output="./your_output.xyz"
 ```
 
-## Tutorial
+## Tutorials
 
 You can run our [Colab tutorial](https://colab.research.google.com/drive/1D6EtMUjQPey_GkuxUAbPgld6_9ibIa-V?authuser=1#scrollTo=Z10787RE1N8T) to quickly get started with MACE.
 
-We also have a more detailed user and developer tutorial at https://github.com/ilyes319/mace-tutorials
+We also have a more detailed Colab tutorials on:
+ - [Introduction to MACE training and evaluation](https://colab.research.google.com/drive/1ZrTuTvavXiCxTFyjBV4GqlARxgFwYAtX)
+ - [Introduction to MACE active learning and fine-tuning](https://colab.research.google.com/drive/1oCSVfMhWrqHTeHbKgUSQN9hTKxLzoNyb)
+ - [MACE theory and code (advanced)](https://colab.research.google.com/drive/1AlfjQETV_jZ0JQnV5M3FGwAM2SGCl2aU)
+
 
 ## On-line data loading for large datasets
 
@@ -343,7 +315,7 @@ We are happy to accept pull requests under an [MIT license](https://choosealicen
 
 If you use this code, please cite our papers:
 
-```text
+```bibtex
 @inproceedings{Batatia2022mace,
   title={{MACE}: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields},
   author={Ilyes Batatia and David Peter Kovacs and Gregor N. C. Simm and Christoph Ortner and Gabor Csanyi},
