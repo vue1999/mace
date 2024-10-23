@@ -355,8 +355,9 @@ def take_step(
 ) -> Tuple[float, Dict[str, Any]]:
     start_time = time.time()
     batch = batch.to(device)
-    optimizer.zero_grad(set_to_none=True)
     batch_dict = batch.to_dict()
+    
+    optimizer.zero_grad(set_to_none=True)
     output = model(
         batch_dict,
         training=True,
@@ -366,6 +367,7 @@ def take_step(
     )
     loss = loss_fn(pred=output, ref=batch)
     loss.backward()
+    
     if max_grad_norm is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
     optimizer.step()
@@ -391,13 +393,12 @@ def take_step_lbfgs(
     max_grad_norm: Optional[float],
     device: torch.device,
 ) -> Tuple[float, Dict[str, Any]]:
-    
     start_time = time.time()
-    batch_ = batch.to(device)
+    batch = batch.to(device)
+    batch_dict = batch.to_dict()
 
     def closure():
-        optimizer.zero_grad()
-        batch_dict = batch_.to_dict()
+        optimizer.zero_grad(set_to_none=True)
         output = model(
             batch_dict,
             training=True,
@@ -405,14 +406,13 @@ def take_step_lbfgs(
             compute_virials=output_args["virials"],
             compute_stress=output_args["stress"],
         )
-        loss = loss_fn(pred=output, ref=batch_)
+        loss = loss_fn(pred=output, ref=batch)
+        if max_grad_norm is not None and loss.requires_grad:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
         return loss
 
     optimizer.step(closure)
     loss = closure()
-    
-    if max_grad_norm is not None and loss.requires_grad:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
 
     if ema is not None:
         ema.update()
