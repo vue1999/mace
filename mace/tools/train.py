@@ -234,7 +234,7 @@ def train(
 
         # Validate
         if epoch % eval_interval == 0:
-            epoch, should_stop, lowest_loss, patience_counter = validate_and_checkpoint(
+            epoch, should_stop, lowest_loss, patience_counter, keep_last = validate_and_checkpoint(
                 model=model,
                 loss_fn=loss_fn,
                 valid_loaders=valid_loaders,
@@ -254,7 +254,8 @@ def train(
                 distributed_model=distributed_model,
                 output_args=output_args,
                 device=device,
-                rank=rank
+                rank=rank,
+                keep_last=keep_last
             )
             if should_stop: break
         if distributed:
@@ -444,7 +445,8 @@ def validate_and_checkpoint(
     output_args: Dict[str, bool],
     device: torch.device,
     rank: Optional[int] = 0,
-) -> Tuple[bool, int, float, int]:
+    keep_last: bool = False,
+) -> Tuple[bool, int, float, int, bool]:
     model_to_evaluate = (
         model if distributed_model is None else distributed_model
     )
@@ -492,7 +494,7 @@ def validate_and_checkpoint(
         wandb.log(wandb_log_dict)
         
     if rank != 0:
-        return False, epoch, lowest_loss, patience_counter
+        return False, epoch, lowest_loss, patience_counter, keep_last
     
     if valid_loss >= lowest_loss:
         patience_counter += 1
@@ -506,7 +508,7 @@ def validate_and_checkpoint(
                 logging.info(
                     f"Stopping optimization after {patience_counter} epochs without improvement"
                 )
-                return True, epoch, lowest_loss, patience_counter
+                return True, epoch, lowest_loss, patience_counter, keep_last
         if save_all_checkpoints:
             param_context = (
                 ema.average_parameters()
@@ -533,7 +535,7 @@ def validate_and_checkpoint(
             )
             keep_last = False or save_all_checkpoints
                 
-    return False, epoch, lowest_loss, patience_counter
+    return False, epoch, lowest_loss, patience_counter, keep_last
 
 
 def evaluate(
