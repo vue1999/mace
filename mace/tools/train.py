@@ -263,6 +263,7 @@ def train(
         epoch += 1
         
     if lbfgs:
+        epoch=10000 # TODO: fix the code instead of using this workaround
         if distributed:
             train_sampler.set_epoch(epoch)
 
@@ -315,29 +316,19 @@ def train_one_epoch(
     lbfgs: bool = False,
 ) -> None:
     model_to_train = model if distributed_model is None else distributed_model
+    take_step_fn = take_step_lbfgs if lbfgs else take_step
+    
     for batch in data_loader:
-        if lbfgs:
-            _, opt_metrics = take_step_lbfgs(
-                model=model_to_train,
-                loss_fn=loss_fn,
-                batch=batch,
-                optimizer=optimizer,
-                ema=ema,
-                output_args=output_args,
-                max_grad_norm=max_grad_norm,
-                device=device,
-        ) 
-        else:
-            _, opt_metrics = take_step(
-                model=model_to_train,
-                loss_fn=loss_fn,
-                batch=batch,
-                optimizer=optimizer,
-                ema=ema,
-                output_args=output_args,
-                max_grad_norm=max_grad_norm,
-                device=device,
-            )
+        _, opt_metrics = take_step_fn(
+            model=model_to_train,
+            loss_fn=loss_fn,
+            batch=batch,
+            optimizer=optimizer,
+            ema=ema,
+            output_args=output_args,
+            max_grad_norm=max_grad_norm,
+            device=device,
+        )
         opt_metrics["mode"] = "opt"
         opt_metrics["epoch"] = epoch
         if rank == 0:
