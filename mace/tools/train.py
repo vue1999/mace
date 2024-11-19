@@ -234,7 +234,7 @@ def train(
 
         # Validate
         if epoch % eval_interval == 0:
-            epoch, should_stop, lowest_loss, patience_counter, keep_last = validate_and_checkpoint(
+            should_stop, epoch, lowest_loss, patience_counter, keep_last = validate_and_checkpoint(
                 model=model,
                 loss_fn=loss_fn,
                 valid_loaders=valid_loaders,
