@@ -75,6 +75,51 @@ def main() -> None:
     run(args)
 
 
+def get_pseudolabels(model, data_loader, device):
+    """Generate pseudolabels using the foundation model."""
+    model.eval()
+    pseudolabels = []
+    
+    with torch.no_grad():
+        for batch in data_loader:
+            batch = batch.to(device)
+            out = model(batch)
+            
+            # Create dict with predicted values
+            pseudo = {
+                'energy': out['energy'].cpu() if 'energy' in out else None,
+                'forces': out['forces'].cpu() if 'forces' in out else None
+            }
+            if 'stress' in out:
+                pseudo['stress'] = out['stress'].cpu()
+            if 'virials' in out:
+                pseudo['virials'] = out['virials'].cpu()
+            if 'dipole' in out:
+                pseudo['dipole'] = out['dipole'].cpu()
+            if 'charges' in out:
+                pseudo['charges'] = out['charges'].cpu()
+                
+            pseudolabels.append(pseudo)
+            
+    return pseudolabels
+
+def apply_pseudolabels(dataset, pseudolabels):
+    """Replace original values with pseudolabels in the dataset."""
+    for data, pseudo in zip(dataset, pseudolabels):
+        if pseudo['energy'] is not None:
+            data.energy = pseudo['energy']
+        if pseudo['forces'] is not None:
+            data.forces = pseudo['forces']
+        if 'stress' in pseudo:
+            data.stress = pseudo['stress']
+        if 'virials' in pseudo:
+            data.virials = pseudo['virials']
+        if 'dipole' in pseudo:
+            data.dipole = pseudo['dipole']
+        if 'charges' in pseudo:
+            data.charges = pseudo['charges']
+    return dataset
+
 def run(args) -> None:
     """
     This script runs the training/fine tuning for mace
@@ -646,6 +691,35 @@ def run(args) -> None:
     # Model
     model, output_args = configure_model(args, train_loader, atomic_energies, model_foundation, heads, z_table, head_configs)
     model.to(device)
+
+    # Generate pseudolabels for replay data if enabled
+    if args.pseudolabel_replay and args.multiheads_finetuning and model_foundation is not None:
+        logging.info("Generating pseudolabels for replay data using foundation model")
+        pt_head_data = train_sets["pt_head"]
+        pt_head_loader = torch_geometric.dataloader.DataLoader(
+            dataset=pt_head_data,
+            batch_size=args.batch_size,
+            shuffle=False,
+            drop_last=False,
+            pin_memory=args.pin_memory,
+            num_workers=args.num_workers,
+        )
+        pseudolabels = get_pseudolabels(model_foundation, pt_head_loader, device)
+        train_sets["pt_head"] = apply_pseudolabels(pt_head_data, pseudolabels)
+        logging.info("Successfully applied pseudolabels to replay data")
+
+        # Recreate concatenated dataset and data loader with pseudolabeled data
+        train_set = ConcatDataset([train_sets[head] for head in heads])
+        train_loader = torch_geometric.dataloader.DataLoader(
+            dataset=train_set,
+            batch_size=args.batch_size,
+            sampler=train_sampler,
+            shuffle=(train_sampler is None),
+            drop_last=(train_sampler is None and not args.lbfgs),
+            pin_memory=args.pin_memory,
+            num_workers=args.num_workers,
+            generator=torch.Generator().manual_seed(args.seed),
+        )
 
     logging.debug(model)
     logging.info(f"Total number of parameters: {tools.count_parameters(model)}")
