@@ -530,6 +530,53 @@ def run(args) -> None:
 
         train_sets[head_config.head_name] = combine_datasets(train_datasets, head_config.head_name)
 
+        # Apply pseudolabeling for the replay head if enabled
+        if args.multiheads_finetuning and args.pseudolabel_replay and head_config.head_name == 'pt_head':
+            logging.info(f"Applying pseudolabeling to the replay head '{head_config.head_name}' using the foundation model.")
+            pseudolabeled_dataset = []
+            # Ensure model_foundation is on the correct device for evaluation
+            model_foundation.to(device)
+            model_foundation.eval() # Set to evaluation mode
+            with torch.no_grad(): # Disable gradient calculation
+                for original_data in train_sets[head_config.head_name]:
+                    # Create a copy to avoid modifying the original data while predicting
+                    data_copy = original_data.clone().to(device)
+
+                    # Get predictions from the foundation model
+                    predictions = model_foundation(data_copy)
+
+                    # Create a new AtomicData object with pseudolabels
+                    pseudolabeled_data = data.AtomicData(
+                        z=original_data.z,
+                        positions=original_data.positions,
+                        cell=original_data.cell,
+                        pbc=original_data.pbc,
+                        edge_index=original_data.edge_index,
+                        edge_vec=original_data.edge_vec,
+                        edge_len=original_data.edge_len,
+                        batch=original_data.batch,
+                        ptr=original_data.ptr,
+                        # Replace original targets with pseudolabels if they exist in predictions
+                        energy=predictions.get('energy', original_data.energy),
+                        forces=predictions.get('forces', original_data.forces),
+                        stress=predictions.get('stress', original_data.stress),
+                        virials=predictions.get('virials', original_data.virials),
+                        dipole=predictions.get('dipole', original_data.dipole),
+                        charges=predictions.get('charges', original_data.charges),
+                        # Keep other original attributes
+                        tags=original_data.tags,
+                        config_type=original_data.config_type,
+                        weights=original_data.weights,
+                        head=original_data.head,
+                        info=original_data.info,
+                        arrays=original_data.arrays,
+                    )
+                    pseudolabeled_dataset.append(pseudolabeled_data)
+
+            # Replace the original dataset for the replay head with the pseudolabeled one
+            train_sets[head_config.head_name] = pseudolabeled_dataset
+            logging.info(f"Pseudolabeling applied to {len(pseudolabeled_dataset)} configurations in the replay head.")
+
         if head_config.valid_file:
             valid_datasets = []
 

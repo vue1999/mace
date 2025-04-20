@@ -438,6 +438,14 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=False,
     )
 
+    # Pseudolabeling
+    parser.add_argument(
+        "--pseudolabel_replay",
+        help="Enable pseudolabeling for the replay head during multiheads finetuning",
+        type=str2bool,
+        default=False,
+    )
+
     # Keys
     parser.add_argument(
         "--energy_key",
