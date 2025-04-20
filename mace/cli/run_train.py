@@ -36,6 +36,8 @@ from mace.tools.multihead_tools import (
     dict_head_to_dataclass,
     prepare_default_head,
     prepare_pt_head,
+    get_pseudolabels,
+    apply_pseudolabels,
 )
 from mace.tools.run_train_utils import (
     combine_datasets,
@@ -74,51 +76,6 @@ def main() -> None:
     args = tools.build_default_arg_parser().parse_args()
     run(args)
 
-
-def get_pseudolabels(model, data_loader, device):
-    """Generate pseudolabels using the foundation model."""
-    model.eval()
-    pseudolabels = []
-    
-    with torch.no_grad():
-        for batch in data_loader:
-            batch = batch.to(device)
-            out = model(batch)
-            
-            # Create dict with predicted values
-            pseudo = {
-                'energy': out['energy'].cpu() if 'energy' in out else None,
-                'forces': out['forces'].cpu() if 'forces' in out else None
-            }
-            if 'stress' in out:
-                pseudo['stress'] = out['stress'].cpu()
-            if 'virials' in out:
-                pseudo['virials'] = out['virials'].cpu()
-            if 'dipole' in out:
-                pseudo['dipole'] = out['dipole'].cpu()
-            if 'charges' in out:
-                pseudo['charges'] = out['charges'].cpu()
-                
-            pseudolabels.append(pseudo)
-            
-    return pseudolabels
-
-def apply_pseudolabels(dataset, pseudolabels):
-    """Replace original values with pseudolabels in the dataset."""
-    for data, pseudo in zip(dataset, pseudolabels):
-        if pseudo['energy'] is not None:
-            data.energy = pseudo['energy']
-        if pseudo['forces'] is not None:
-            data.forces = pseudo['forces']
-        if 'stress' in pseudo:
-            data.stress = pseudo['stress']
-        if 'virials' in pseudo:
-            data.virials = pseudo['virials']
-        if 'dipole' in pseudo:
-            data.dipole = pseudo['dipole']
-        if 'charges' in pseudo:
-            data.charges = pseudo['charges']
-    return dataset
 
 def run(args) -> None:
     """
