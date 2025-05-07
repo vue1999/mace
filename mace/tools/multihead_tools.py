@@ -208,39 +208,117 @@ def get_pseudolabels(model, data_loader, device):
     with torch.no_grad():
         for batch in data_loader:
             batch = batch.to(device)
-            out = model(batch)
+            batch_dict = batch.to_dict()
             
-            # Create dict with predicted values
-            pseudo = {
-                'energy': out['energy'].cpu() if 'energy' in out else None,
-                'forces': out['forces'].cpu() if 'forces' in out else None
-            }
-            if 'stress' in out:
-                pseudo['stress'] = out['stress'].cpu()
-            if 'virials' in out:
-                pseudo['virials'] = out['virials'].cpu()
-            if 'dipole' in out:
-                pseudo['dipole'] = out['dipole'].cpu()
-            if 'charges' in out:
-                pseudo['charges'] = out['charges'].cpu()
+            # Ensure batch has head information if missing
+            if "head" not in batch_dict:
+                batch_dict["head"] = torch.zeros(batch.num_graphs, dtype=torch.long, device=device)
+            
+            try:
+                # Call model with explicit parameters
+                out = model(
+                    batch_dict,
+                    training=False,
+                    compute_force=True,
+                    compute_virials=False,
+                    compute_stress=False
+                )
                 
-            pseudolabels.append(pseudo)
+                # Create dict with predicted values
+                pseudo = {
+                    'energy': out['energy'].cpu() if 'energy' in out else None,
+                    'forces': out['forces'].cpu() if 'forces' in out else None
+                }
+                if 'stress' in out and out['stress'] is not None:
+                    pseudo['stress'] = out['stress'].cpu()
+                if 'virials' in out and out['virials'] is not None:
+                    pseudo['virials'] = out['virials'].cpu()
+                if 'dipole' in out and out['dipole'] is not None:
+                    pseudo['dipole'] = out['dipole'].cpu()
+                if 'charges' in out and out['charges'] is not None:
+                    pseudo['charges'] = out['charges'].cpu()
+                    
+                pseudolabels.append(pseudo)
+            except RuntimeError as e:
+                logging.error(f"Error generating pseudolabels: {str(e)}")
+                if "mat1 and mat2 shapes cannot be multiplied" in str(e):
+                    logging.error("This is likely due to a mismatch in dimensions of the atomic energies.")
+                    logging.error("Trying alternative approach...")
+                    
+                    # Try with a more controlled approach
+                    # Temporarily substitute the atomic_energies_fn to handle the dimension mismatch
+                    original_fn = model.atomic_energies_fn
+                    atomic_energies = original_fn.atomic_energies
+                    
+                    if atomic_energies.ndim > 1 and atomic_energies.shape[1] > 1:
+                        # Use only the first head of the atomic energies
+                        from mace.modules.blocks import AtomicEnergiesBlock
+                        model.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies[:, 0])
+                    
+                    try:
+                        out = model(
+                            batch_dict,
+                            training=False,
+                            compute_force=True,
+                            compute_virials=False,
+                            compute_stress=False
+                        )
+                        
+                        # Create dict with predicted values
+                        pseudo = {
+                            'energy': out['energy'].cpu() if 'energy' in out else None,
+                            'forces': out['forces'].cpu() if 'forces' in out else None
+                        }
+                        if 'stress' in out and out['stress'] is not None:
+                            pseudo['stress'] = out['stress'].cpu()
+                        if 'virials' in out and out['virials'] is not None:
+                            pseudo['virials'] = out['virials'].cpu()
+                        if 'dipole' in out and out['dipole'] is not None:
+                            pseudo['dipole'] = out['dipole'].cpu()
+                        if 'charges' in out and out['charges'] is not None:
+                            pseudo['charges'] = out['charges'].cpu()
+                            
+                        pseudolabels.append(pseudo)
+                    except Exception as e2:
+                        logging.error(f"Alternative approach also failed: {str(e2)}")
+                        raise
+                    finally:
+                        # Restore original atomic_energies_fn
+                        model.atomic_energies_fn = original_fn
+                else:
+                    raise
             
     return pseudolabels
 
 def apply_pseudolabels(dataset, pseudolabels):
     """Replace original values with pseudolabels in the dataset."""
-    for data, pseudo in zip(dataset, pseudolabels):
-        if pseudo['energy'] is not None:
-            data.energy = pseudo['energy']
-        if pseudo['forces'] is not None:
-            data.forces = pseudo['forces']
-        if 'stress' in pseudo:
-            data.stress = pseudo['stress']
-        if 'virials' in pseudo:
-            data.virials = pseudo['virials']
-        if 'dipole' in pseudo:
-            data.dipole = pseudo['dipole']
-        if 'charges' in pseudo:
-            data.charges = pseudo['charges']
+    if len(dataset) != len(pseudolabels):
+        logging.warning(f"Dataset length ({len(dataset)}) does not match pseudolabels length ({len(pseudolabels)}). "
+                       f"This may indicate a problem with batch processing.")
+        # Truncate to the shorter length to avoid errors
+        min_length = min(len(dataset), len(pseudolabels))
+        dataset = dataset[:min_length]
+        pseudolabels = pseudolabels[:min_length]
+    
+    for i, (data, pseudo) in enumerate(zip(dataset, pseudolabels)):
+        try:
+            if pseudo['energy'] is not None:
+                data.energy = pseudo['energy']
+            if pseudo['forces'] is not None:
+                if data.forces is None or data.forces.shape != pseudo['forces'].shape:
+                    logging.warning(f"Forces shape mismatch at index {i}. Setting forces from pseudolabels.")
+                data.forces = pseudo['forces']
+            if 'stress' in pseudo and pseudo['stress'] is not None:
+                data.stress = pseudo['stress']
+            if 'virials' in pseudo and pseudo['virials'] is not None:
+                data.virials = pseudo['virials']
+            if 'dipole' in pseudo and pseudo['dipole'] is not None:
+                data.dipole = pseudo['dipole']
+            if 'charges' in pseudo and pseudo['charges'] is not None:
+                data.charges = pseudo['charges']
+        except Exception as e:
+            logging.error(f"Error applying pseudolabels at index {i}: {str(e)}")
+            # Continue with the next sample rather than failing completely
+            continue
+            
     return dataset

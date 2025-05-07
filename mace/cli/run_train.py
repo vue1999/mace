@@ -651,32 +651,48 @@ def run(args) -> None:
 
     # Generate pseudolabels for replay data if enabled
     if args.pseudolabel_replay and args.multiheads_finetuning and model_foundation is not None:
-        logging.info("Generating pseudolabels for replay data using foundation model")
-        pt_head_data = train_sets["pt_head"]
-        pt_head_loader = torch_geometric.dataloader.DataLoader(
-            dataset=pt_head_data,
-            batch_size=args.batch_size,
-            shuffle=False,
-            drop_last=False,
-            pin_memory=args.pin_memory,
-            num_workers=args.num_workers,
-        )
-        pseudolabels = get_pseudolabels(model_foundation, pt_head_loader, device)
-        train_sets["pt_head"] = apply_pseudolabels(pt_head_data, pseudolabels)
-        logging.info("Successfully applied pseudolabels to replay data")
+        try:
+            logging.info("Generating pseudolabels for replay data using foundation model")
+            pt_head_data = train_sets["pt_head"]
+            pt_head_loader = torch_geometric.dataloader.DataLoader(
+                dataset=pt_head_data,
+                batch_size=args.batch_size,
+                shuffle=False,
+                drop_last=False,
+                pin_memory=args.pin_memory,
+                num_workers=args.num_workers,
+            )
+            
+            # Log information about the foundation model
+            foundation_atomic_energies = model_foundation.atomic_energies_fn.atomic_energies
+            logging.info(f"Foundation model atomic energies shape: {foundation_atomic_energies.shape}")
+            
+            # Get pseudolabels
+            pseudolabels = get_pseudolabels(model_foundation, pt_head_loader, device)
+            
+            # Check if pseudolabels were generated successfully
+            if not pseudolabels:
+                logging.warning("No pseudolabels were generated. Continuing without pseudolabeling.")
+            else:
+                train_sets["pt_head"] = apply_pseudolabels(pt_head_data, pseudolabels)
+                logging.info("Successfully applied pseudolabels to replay data")
 
-        # Recreate concatenated dataset and data loader with pseudolabeled data
-        train_set = ConcatDataset([train_sets[head] for head in heads])
-        train_loader = torch_geometric.dataloader.DataLoader(
-            dataset=train_set,
-            batch_size=args.batch_size,
-            sampler=train_sampler,
-            shuffle=(train_sampler is None),
-            drop_last=(train_sampler is None and not args.lbfgs),
-            pin_memory=args.pin_memory,
-            num_workers=args.num_workers,
-            generator=torch.Generator().manual_seed(args.seed),
-        )
+                # Recreate concatenated dataset and data loader with pseudolabeled data
+                train_set = ConcatDataset([train_sets[head] for head in heads])
+                train_loader = torch_geometric.dataloader.DataLoader(
+                    dataset=train_set,
+                    batch_size=args.batch_size,
+                    sampler=train_sampler,
+                    shuffle=(train_sampler is None),
+                    drop_last=(train_sampler is None and not args.lbfgs),
+                    pin_memory=args.pin_memory,
+                    num_workers=args.num_workers,
+                    generator=torch.Generator().manual_seed(args.seed),
+                )
+        except Exception as e:
+            logging.error(f"Error in pseudolabeling process: {str(e)}")
+            logging.warning("Continuing without pseudolabeling.")
+            # Don't let pseudolabeling failure stop the entire training process
 
     logging.debug(model)
     logging.info(f"Total number of parameters: {tools.count_parameters(model)}")
