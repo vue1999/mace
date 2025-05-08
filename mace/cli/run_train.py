@@ -650,7 +650,7 @@ def run(args) -> None:
     model.to(device)
 
     # Generate pseudolabels for replay data if enabled
-    if args.pseudolabel_replay and args.multiheads_finetuning and model_foundation is not None:
+    if args.pseudolabel_replay and args.multiheads_finetuning:
         try:
             logging.info("Generating pseudolabels for replay data using foundation model")
             pt_head_data = train_sets["pt_head"]
@@ -663,12 +663,7 @@ def run(args) -> None:
                 num_workers=args.num_workers,
             )
             
-            # Log information about the foundation model
-            foundation_atomic_energies = model_foundation.atomic_energies_fn.atomic_energies
-            logging.info(f"Foundation model atomic energies shape: {foundation_atomic_energies.shape}")
-            
-            # Get pseudolabels
-            pseudolabels = get_pseudolabels(model_foundation, pt_head_loader, device)
+            pseudolabels = get_pseudolabels(model, pt_head_loader, device)
             
             # Check if pseudolabels were generated successfully
             if not pseudolabels:
