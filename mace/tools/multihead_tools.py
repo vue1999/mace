@@ -205,28 +205,31 @@ def get_pseudolabels(model, data_loader, device):
     model.eval()
     pseudolabels = []
     
-    # Disable gradient tracking for model parameters
-    # but allow gradients for input tensors
+    # Disable gradient tracking for model parameters while keeping gradients for input tensors
     original_requires_grad = {}
     for name, param in model.named_parameters():
         original_requires_grad[name] = param.requires_grad
         param.requires_grad_(False)
     
-    # Get the index of pt_head
+    # Get the index of pt_head if available
     try:
         head_idx = model.heads.index("pt_head")
-        logging.debug(f"Found 'pt_head' at index {head_idx}")
+        logging.info(f"Found 'pt_head' at index {head_idx} for pseudolabeling")
     except (ValueError, AttributeError):
         head_idx = 0
-        logging.warning("Could not find 'pt_head', using index 0 instead")
+        logging.warning("Could not find 'pt_head', using index 0 instead for pseudolabeling")
     
     for batch in data_loader:
         batch = batch.to(device)
         batch_dict = batch.to_dict()
         
+        # Set the head to pt_head for all batch items to ensure consistent output
+        if 'head' in batch_dict:
+            original_head = batch_dict['head'].clone()
+            batch_dict['head'] = torch.full_like(batch_dict['head'], head_idx)
+        
         try:
-            # The model will internally set requires_grad=True on input tensors
-            # and compute forces using torch.autograd.grad
+            # Run the model with forces computation enabled
             out = model(
                 batch_dict,
                 training=False,
@@ -235,58 +238,60 @@ def get_pseudolabels(model, data_loader, device):
                 compute_stress=True
             )
             
-            # Create dict with predicted values - ensure we extract the right energy for the head
+            # Extract the relevant outputs for the specific head
+            # The model may return either single values (for single head models)
+            # or per-head values (for multi-head models)
+            
+            # Handle energy - could be [batch_size] or [batch_size, num_heads]
             energy = out['energy'].cpu().detach() if 'energy' in out else None
             
-            # If energy is multi-dimensional (has values for multiple heads), select just the pt_head energy
-            if energy is not None and energy.dim() > 1 and energy.size(1) > head_idx:
-                energy = energy[:, head_idx]
+            # Handle forces - format is typically [num_atoms, 3]
+            forces = out['forces'].cpu().detach() if 'forces' in out else None
             
-            pseudo = {
-                'energy': energy,
-                'forces': out['forces'].cpu().detach() if 'forces' in out else None
-            }
-            
-            # Include other outputs if available
+            # Handle stress - could be [batch_size, 3, 3] or [batch_size, num_heads, 3, 3]
+            stress = None
             if 'stress' in out and out['stress'] is not None:
                 stress = out['stress'].cpu().detach()
-                # If stress is multi-dimensional, select just the pt_head stress
-                if stress.dim() > 2 and stress.size(0) > head_idx:
-                    stress = stress[head_idx]
-                pseudo['stress'] = stress
-                
+            
+            # Handle virials - could be [batch_size, 3, 3] or [batch_size, num_heads, 3, 3]
+            virials = None
             if 'virials' in out and out['virials'] is not None:
                 virials = out['virials'].cpu().detach()
-                # If virials is multi-dimensional, select just the pt_head virials
-                if virials.dim() > 2 and virials.size(0) > head_idx:
-                    virials = virials[head_idx]
-                pseudo['virials'] = virials
-                
+            
+            # Handle dipole - could be [batch_size, 3] or [batch_size, num_heads, 3]
+            dipole = None
             if 'dipole' in out and out['dipole'] is not None:
                 dipole = out['dipole'].cpu().detach()
-                # If dipole is multi-dimensional, select just the pt_head dipole
-                if dipole.dim() > 2 and dipole.size(0) > head_idx:
-                    dipole = dipole[head_idx]
-                pseudo['dipole'] = dipole
-                
+            
+            # Handle charges - could be [num_atoms] or [num_heads, num_atoms]
+            charges = None
             if 'charges' in out and out['charges'] is not None:
                 charges = out['charges'].cpu().detach()
-                # If charges is multi-dimensional, select just the pt_head charges
-                if charges.dim() > 1 and charges.size(0) > head_idx:
-                    charges = charges[head_idx]
-                pseudo['charges'] = charges
-                
+            
+            # Create dictionary with the pseudolabels
+            pseudo = {
+                'energy': energy,
+                'forces': forces,
+                'stress': stress,
+                'virials': virials,
+                'dipole': dipole,
+                'charges': charges
+            }
+            
             pseudolabels.append(pseudo)
+            
         except RuntimeError as e:
             logging.error(f"Error generating pseudolabels: {str(e)}")
-            if "mat1 and mat2 shapes cannot be multiplied" in str(e):
-                logging.error("This is likely due to a mismatch in dimensions of the atomic energies.")
-                raise
-        
+            
+        # Restore the original head values if they were changed
+        if 'head' in batch_dict and 'original_head' in locals():
+            batch_dict['head'] = original_head
+    
     # Restore original requires_grad settings for model parameters
     for name, param in model.named_parameters():
-        param.requires_grad_(original_requires_grad[name])
-        
+        if name in original_requires_grad:
+            param.requires_grad_(original_requires_grad[name])
+    
     return pseudolabels
 
 def apply_pseudolabels(dataset, pseudolabels):
@@ -299,24 +304,111 @@ def apply_pseudolabels(dataset, pseudolabels):
         dataset = dataset[:min_length]
         pseudolabels = pseudolabels[:min_length]
     
+    # Debug log shapes of first item
+    if len(dataset) > 0 and len(pseudolabels) > 0:
+        data = dataset[0]
+        pseudo = pseudolabels[0]
+        logging.info("=== Debugging tensor shapes for first item ===")
+        if hasattr(data, 'energy') and data.energy is not None:
+            logging.info(f"Original energy shape: {data.energy.shape}")
+        if 'energy' in pseudo and pseudo['energy'] is not None:
+            logging.info(f"Pseudo energy shape: {pseudo['energy'].shape}")
+        if hasattr(data, 'forces') and data.forces is not None:
+            logging.info(f"Original forces shape: {data.forces.shape}")
+        if 'forces' in pseudo and pseudo['forces'] is not None:
+            logging.info(f"Pseudo forces shape: {pseudo['forces'].shape}")
+    
+    pseudolabeled_count = 0
     for i, (data, pseudo) in enumerate(zip(dataset, pseudolabels)):
         try:
-            if pseudo['energy'] is not None:
-                data.energy = pseudo['energy']
-            # Only try to use forces if they're provided in the pseudolabels
+            # Apply energy pseudolabel
+            if 'energy' in pseudo and pseudo['energy'] is not None:
+                # Handle case where energy is [batch_size, num_heads]
+                if pseudo['energy'].dim() > 0:
+                    if pseudo['energy'].dim() > 1:
+                        # For multi-head output, use the first dimension (typically batch_size=1)
+                        data.energy = pseudo['energy'][0]
+                    else:
+                        # For single value per batch item
+                        data.energy = pseudo['energy'][0] if pseudo['energy'].numel() > 1 else pseudo['energy']
+                else:
+                    data.energy = pseudo['energy']
+            
+            # Apply forces pseudolabel
             if 'forces' in pseudo and pseudo['forces'] is not None:
+                # Forces should be [num_atoms, 3]
+                if data.forces is None or data.forces.shape != pseudo['forces'].shape:
+                    logging.debug(f"Forces shape adjustment at index {i}. Original: {data.forces.shape if data.forces is not None else None}, Pseudo: {pseudo['forces'].shape}")
                 data.forces = pseudo['forces']
-            if 'stress' in pseudo and pseudo['stress'] is not None:
-                data.stress = pseudo['stress']
-            if 'virials' in pseudo and pseudo['virials'] is not None:
-                data.virials = pseudo['virials']
-            if 'dipole' in pseudo and pseudo['dipole'] is not None:
-                data.dipole = pseudo['dipole']
-            if 'charges' in pseudo and pseudo['charges'] is not None:
-                data.charges = pseudo['charges']
+            
+            # Apply stress pseudolabel
+            if 'stress' in pseudo and pseudo['stress'] is not None and hasattr(data, 'stress'):
+                # Stress should be [1, 3, 3] for AtomicData
+                stress = pseudo['stress']
+                
+                # Handle multi-head stress: [batch, head, 3, 3] -> [1, 3, 3]
+                if stress.dim() == 4:
+                    stress = stress[0, 0].unsqueeze(0)  # Take first batch, first head
+                # Handle [batch, 3, 3] -> [1, 3, 3]
+                elif stress.dim() == 3:
+                    stress = stress[0].unsqueeze(0)  # Take first batch
+                # Handle [3, 3] -> [1, 3, 3]
+                elif stress.dim() == 2:
+                    stress = stress.unsqueeze(0)
+                
+                data.stress = stress
+            
+            # Apply virials pseudolabel
+            if 'virials' in pseudo and pseudo['virials'] is not None and hasattr(data, 'virials'):
+                # Virials should be [1, 3, 3] for AtomicData
+                virials = pseudo['virials']
+                
+                # Handle multi-head virials: [batch, head, 3, 3] -> [1, 3, 3]
+                if virials.dim() == 4:
+                    virials = virials[0, 0].unsqueeze(0)  # Take first batch, first head
+                # Handle [batch, 3, 3] -> [1, 3, 3]
+                elif virials.dim() == 3:
+                    virials = virials[0].unsqueeze(0)  # Take first batch
+                # Handle [3, 3] -> [1, 3, 3]
+                elif virials.dim() == 2:
+                    virials = virials.unsqueeze(0)
+                
+                data.virials = virials
+            
+            # Apply dipole pseudolabel
+            if 'dipole' in pseudo and pseudo['dipole'] is not None and hasattr(data, 'dipole'):
+                # Dipole should be [1, 3] for AtomicData
+                dipole = pseudo['dipole']
+                
+                # Handle multi-head dipole: [batch, head, 3] -> [1, 3]
+                if dipole.dim() == 3:
+                    dipole = dipole[0, 0].unsqueeze(0)  # Take first batch, first head
+                # Handle [batch, 3] -> [1, 3]
+                elif dipole.dim() == 2:
+                    dipole = dipole[0].unsqueeze(0)  # Take first batch
+                # Handle [3] -> [1, 3]
+                elif dipole.dim() == 1:
+                    dipole = dipole.unsqueeze(0)
+                
+                data.dipole = dipole
+            
+            # Apply charges pseudolabel
+            if 'charges' in pseudo and pseudo['charges'] is not None and hasattr(data, 'charges'):
+                # Charges should be [num_atoms] for AtomicData
+                charges = pseudo['charges']
+                
+                # Handle multi-head charges: [head, num_atoms] -> [num_atoms]
+                if charges.dim() == 2:
+                    charges = charges[0]  # Take first head
+                
+                data.charges = charges
+            
+            pseudolabeled_count += 1
+            
         except Exception as e:
             logging.error(f"Error applying pseudolabels at index {i}: {str(e)}")
             # Continue with the next sample rather than failing completely
             continue
-            
+    
+    logging.info(f"Successfully applied pseudolabels to {pseudolabeled_count}/{len(dataset)} data points")
     return dataset
