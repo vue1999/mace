@@ -205,41 +205,55 @@ def get_pseudolabels(model, data_loader, device):
     model.eval()
     pseudolabels = []
     
-    with torch.no_grad():
-        for batch in data_loader:
-            batch = batch.to(device)
-            batch_dict = batch.to_dict()
-
-            try:
-                out = model(
-                    batch_dict,
-                    training=False,
-                    compute_force=True,
-                    compute_virials=False,
-                    compute_stress=False
-                )
-                
-                # Create dict with predicted values
-                pseudo = {
-                    'energy': out['energy'].cpu() if 'energy' in out else None,
-                    'forces': out['forces'].cpu() if 'forces' in out else None
-                }
-                if 'stress' in out and out['stress'] is not None:
-                    pseudo['stress'] = out['stress'].cpu()
-                if 'virials' in out and out['virials'] is not None:
-                    pseudo['virials'] = out['virials'].cpu()
-                if 'dipole' in out and out['dipole'] is not None:
-                    pseudo['dipole'] = out['dipole'].cpu()
-                if 'charges' in out and out['charges'] is not None:
-                    pseudo['charges'] = out['charges'].cpu()
-                    
-                pseudolabels.append(pseudo)
-            except RuntimeError as e:
-                logging.error(f"Error generating pseudolabels: {str(e)}")
-                if "mat1 and mat2 shapes cannot be multiplied" in str(e):
-                    logging.error("This is likely due to a mismatch in dimensions of the atomic energies.")
-                    raise
+    # Disable gradient tracking for model parameters
+    # but allow gradients for input tensors
+    original_requires_grad = {}
+    for name, param in model.named_parameters():
+        original_requires_grad[name] = param.requires_grad
+        param.requires_grad_(False)
+    
+    for batch in data_loader:
+        batch = batch.to(device)
+        batch_dict = batch.to_dict()
+        
+        try:
+            # The model will internally set requires_grad=True on input tensors
+            # and compute forces using torch.autograd.grad
+            out = model(
+                batch_dict,
+                training=False,
+                compute_force=True,
+                compute_virials=True,
+                compute_stress=True
+            )
             
+            # Create dict with predicted values
+            pseudo = {
+                'energy': out['energy'].cpu().detach() if 'energy' in out else None,
+                'forces': out['forces'].cpu().detach() if 'forces' in out else None
+            }
+            
+            # Include other outputs if available
+            if 'stress' in out and out['stress'] is not None:
+                pseudo['stress'] = out['stress'].cpu().detach()
+            if 'virials' in out and out['virials'] is not None:
+                pseudo['virials'] = out['virials'].cpu().detach()
+            if 'dipole' in out and out['dipole'] is not None:
+                pseudo['dipole'] = out['dipole'].cpu().detach()
+            if 'charges' in out and out['charges'] is not None:
+                pseudo['charges'] = out['charges'].cpu().detach()
+                
+            pseudolabels.append(pseudo)
+        except RuntimeError as e:
+            logging.error(f"Error generating pseudolabels: {str(e)}")
+            if "mat1 and mat2 shapes cannot be multiplied" in str(e):
+                logging.error("This is likely due to a mismatch in dimensions of the atomic energies.")
+                raise
+        
+    # Restore original requires_grad settings for model parameters
+    for name, param in model.named_parameters():
+        param.requires_grad_(original_requires_grad[name])
+        
     return pseudolabels
 
 def apply_pseudolabels(dataset, pseudolabels):
@@ -256,9 +270,8 @@ def apply_pseudolabels(dataset, pseudolabels):
         try:
             if pseudo['energy'] is not None:
                 data.energy = pseudo['energy']
-            if pseudo['forces'] is not None:
-                if data.forces is None or data.forces.shape != pseudo['forces'].shape:
-                    logging.warning(f"Forces shape mismatch at index {i}. Setting forces from pseudolabels.")
+            # Only try to use forces if they're provided in the pseudolabels
+            if 'forces' in pseudo and pseudo['forces'] is not None:
                 data.forces = pseudo['forces']
             if 'stress' in pseudo and pseudo['stress'] is not None:
                 data.stress = pseudo['stress']
