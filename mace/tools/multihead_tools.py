@@ -212,6 +212,14 @@ def get_pseudolabels(model, data_loader, device):
         original_requires_grad[name] = param.requires_grad
         param.requires_grad_(False)
     
+    # Get the index of pt_head
+    try:
+        head_idx = model.heads.index("pt_head")
+        logging.debug(f"Found 'pt_head' at index {head_idx}")
+    except (ValueError, AttributeError):
+        head_idx = 0
+        logging.warning("Could not find 'pt_head', using index 0 instead")
+    
     for batch in data_loader:
         batch = batch.to(device)
         batch_dict = batch.to_dict()
@@ -227,21 +235,46 @@ def get_pseudolabels(model, data_loader, device):
                 compute_stress=True
             )
             
-            # Create dict with predicted values
+            # Create dict with predicted values - ensure we extract the right energy for the head
+            energy = out['energy'].cpu().detach() if 'energy' in out else None
+            
+            # If energy is multi-dimensional (has values for multiple heads), select just the pt_head energy
+            if energy is not None and energy.dim() > 1 and energy.size(1) > head_idx:
+                energy = energy[:, head_idx]
+            
             pseudo = {
-                'energy': out['energy'].cpu().detach() if 'energy' in out else None,
+                'energy': energy,
                 'forces': out['forces'].cpu().detach() if 'forces' in out else None
             }
             
             # Include other outputs if available
             if 'stress' in out and out['stress'] is not None:
-                pseudo['stress'] = out['stress'].cpu().detach()
+                stress = out['stress'].cpu().detach()
+                # If stress is multi-dimensional, select just the pt_head stress
+                if stress.dim() > 2 and stress.size(0) > head_idx:
+                    stress = stress[head_idx]
+                pseudo['stress'] = stress
+                
             if 'virials' in out and out['virials'] is not None:
-                pseudo['virials'] = out['virials'].cpu().detach()
+                virials = out['virials'].cpu().detach()
+                # If virials is multi-dimensional, select just the pt_head virials
+                if virials.dim() > 2 and virials.size(0) > head_idx:
+                    virials = virials[head_idx]
+                pseudo['virials'] = virials
+                
             if 'dipole' in out and out['dipole'] is not None:
-                pseudo['dipole'] = out['dipole'].cpu().detach()
+                dipole = out['dipole'].cpu().detach()
+                # If dipole is multi-dimensional, select just the pt_head dipole
+                if dipole.dim() > 2 and dipole.size(0) > head_idx:
+                    dipole = dipole[head_idx]
+                pseudo['dipole'] = dipole
+                
             if 'charges' in out and out['charges'] is not None:
-                pseudo['charges'] = out['charges'].cpu().detach()
+                charges = out['charges'].cpu().detach()
+                # If charges is multi-dimensional, select just the pt_head charges
+                if charges.dim() > 1 and charges.size(0) > head_idx:
+                    charges = charges[head_idx]
+                pseudo['charges'] = charges
                 
             pseudolabels.append(pseudo)
         except RuntimeError as e:
