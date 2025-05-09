@@ -223,9 +223,6 @@ def get_pseudolabels(model, data_loader, device):
         batch = batch.to(device)
         batch_dict = batch.to_dict()
         
-        # Store original batch data for unbatching
-        batch_size = len(batch_dict.get('batch', []))
-        
         # Set the head to pt_head for all batch items to ensure consistent output
         if 'head' in batch_dict:
             original_head = batch_dict['head'].clone()
@@ -250,64 +247,84 @@ def get_pseudolabels(model, data_loader, device):
                 sample_data = batch.get_example(i)
                 sample_idx = i
                 
+                # Create a copy of the original data to modify with pseudolabels
+                # This ensures we maintain all the required fields for AtomicData
+                pseudo_data = sample_data.clone()
+                
                 # Extract energy - scalar per sample
-                energy = None
                 if 'energy' in out and out['energy'] is not None:
                     energy_tensor = out['energy'].cpu().detach()
                     if energy_tensor.dim() > 0:
-                        energy = energy_tensor[sample_idx].clone() if sample_idx < energy_tensor.size(0) else None
+                        if sample_idx < energy_tensor.size(0):
+                            energy = energy_tensor[sample_idx].clone()
+                            # Ensure it's a scalar (0-dimensional tensor)
+                            pseudo_data.energy = energy.view([])
                 
                 # Extract forces - need to extract atoms for this specific sample
-                forces = None
                 if 'forces' in out and out['forces'] is not None:
                     forces_tensor = out['forces'].cpu().detach()
                     # Extract atoms for this sample using batch.get_example
                     atoms_indices = (batch.batch == sample_idx).cpu()
                     if atoms_indices.any():
                         forces = forces_tensor[atoms_indices].clone()
+                        if forces.shape[0] == pseudo_data.positions.shape[0]:
+                            pseudo_data.forces = forces
                 
                 # Extract stress
-                stress = None
                 if 'stress' in out and out['stress'] is not None:
                     stress_tensor = out['stress'].cpu().detach()
                     if stress_tensor.dim() == 3:  # [batch, 3, 3]
-                        stress = stress_tensor[sample_idx].clone() if sample_idx < stress_tensor.size(0) else None
+                        if sample_idx < stress_tensor.size(0):
+                            stress = stress_tensor[sample_idx].clone()
+                            # Make sure it's [1, 3, 3]
+                            if stress.shape == (3, 3):
+                                stress = stress.unsqueeze(0)
+                            pseudo_data.stress = stress
                     elif stress_tensor.dim() == 4:  # [batch, heads, 3, 3] 
-                        stress = stress_tensor[sample_idx, head_idx].clone() if sample_idx < stress_tensor.size(0) else None
-                    elif stress_tensor.dim() == 2:  # [3, 3]
-                        stress = stress_tensor.clone()
-                    # Ensure [3, 3] shape
-                    if stress is not None and stress.dim() == 2 and stress.shape[0] == 3 and stress.shape[1] == 3:
-                        stress = stress.unsqueeze(0)  # Make [1, 3, 3]
+                        if sample_idx < stress_tensor.size(0):
+                            stress = stress_tensor[sample_idx, head_idx].clone()
+                            # Make sure it's [1, 3, 3]
+                            if stress.shape == (3, 3):
+                                stress = stress.unsqueeze(0)
+                            pseudo_data.stress = stress
                 
                 # Extract virials
-                virials = None
                 if 'virials' in out and out['virials'] is not None:
                     virials_tensor = out['virials'].cpu().detach()
                     if virials_tensor.dim() == 3:  # [batch, 3, 3]
-                        virials = virials_tensor[sample_idx].clone() if sample_idx < virials_tensor.size(0) else None
+                        if sample_idx < virials_tensor.size(0):
+                            virials = virials_tensor[sample_idx].clone()
+                            # Make sure it's [1, 3, 3]
+                            if virials.shape == (3, 3):
+                                virials = virials.unsqueeze(0)
+                            pseudo_data.virials = virials
                     elif virials_tensor.dim() == 4:  # [batch, heads, 3, 3]
-                        virials = virials_tensor[sample_idx, head_idx].clone() if sample_idx < virials_tensor.size(0) else None
-                    elif virials_tensor.dim() == 2:  # [3, 3]
-                        virials = virials_tensor.clone()
-                    # Ensure [3, 3] shape
-                    if virials is not None and virials.dim() == 2 and virials.shape[0] == 3 and virials.shape[1] == 3:
-                        virials = virials.unsqueeze(0)  # Make [1, 3, 3]
+                        if sample_idx < virials_tensor.size(0):
+                            virials = virials_tensor[sample_idx, head_idx].clone()
+                            # Make sure it's [1, 3, 3]
+                            if virials.shape == (3, 3):
+                                virials = virials.unsqueeze(0)
+                            pseudo_data.virials = virials
                 
                 # Extract dipole
-                dipole = None
                 if 'dipole' in out and out['dipole'] is not None:
                     dipole_tensor = out['dipole'].cpu().detach()
                     if dipole_tensor.dim() == 2:  # [batch, 3]
-                        dipole = dipole_tensor[sample_idx].clone() if sample_idx < dipole_tensor.size(0) else None
+                        if sample_idx < dipole_tensor.size(0):
+                            dipole = dipole_tensor[sample_idx].clone()
+                            # Make sure it's [1, 3]
+                            if dipole.shape == (3,):
+                                dipole = dipole.unsqueeze(0)
+                            pseudo_data.dipole = dipole
                     elif dipole_tensor.dim() == 3:  # [batch, heads, 3]
-                        dipole = dipole_tensor[sample_idx, head_idx].clone() if sample_idx < dipole_tensor.size(0) else None
-                    # Ensure [3] shape for dipole
-                    if dipole is not None and dipole.dim() == 1 and dipole.size(0) == 3:
-                        dipole = dipole.unsqueeze(0)  # Make [1, 3]
+                        if sample_idx < dipole_tensor.size(0):
+                            dipole = dipole_tensor[sample_idx, head_idx].clone()
+                            # Make sure it's [1, 3]
+                            if dipole.shape == (3,):
+                                dipole = dipole.unsqueeze(0)
+                            pseudo_data.dipole = dipole
                 
                 # Extract charges
-                charges = None
                 if 'charges' in out and out['charges'] is not None:
                     charges_tensor = out['charges'].cpu().detach()
                     # Extract atoms for this sample
@@ -315,20 +332,15 @@ def get_pseudolabels(model, data_loader, device):
                     if atoms_indices.any():
                         if charges_tensor.dim() == 1:  # [total_atoms]
                             charges = charges_tensor[atoms_indices].clone()
+                            if charges.shape[0] == pseudo_data.positions.shape[0]:
+                                pseudo_data.charges = charges
                         elif charges_tensor.dim() == 2:  # [heads, total_atoms]
                             charges = charges_tensor[head_idx, atoms_indices].clone()
+                            if charges.shape[0] == pseudo_data.positions.shape[0]:
+                                pseudo_data.charges = charges
                 
-                # Create pseudolabel dict for this sample
-                sample_pseudo = {
-                    'energy': energy,
-                    'forces': forces,
-                    'stress': stress,
-                    'virials': virials,
-                    'dipole': dipole,
-                    'charges': charges
-                }
-                
-                pseudolabels.append(sample_pseudo)
+                # Append the complete AtomicData object with pseudolabels
+                pseudolabels.append(pseudo_data)
                 
         except RuntimeError as e:
             logging.error(f"Error generating pseudolabels: {str(e)}")
@@ -355,92 +367,9 @@ def apply_pseudolabels(dataset, pseudolabels):
         dataset = dataset[:min_length]
         pseudolabels = pseudolabels[:min_length]
     
-    # Debug log shapes of first item
+    # Log some information about the pseudolabeled data
     if len(dataset) > 0 and len(pseudolabels) > 0:
-        data = dataset[0]
-        pseudo = pseudolabels[0]
-        logging.info("=== Debugging tensor shapes for first item ===")
-        if hasattr(data, 'energy') and data.energy is not None:
-            logging.info(f"Original energy shape: {data.energy.shape}")
-        if 'energy' in pseudo and pseudo['energy'] is not None:
-            logging.info(f"Pseudo energy shape: {pseudo['energy'].shape}")
-        if hasattr(data, 'forces') and data.forces is not None:
-            logging.info(f"Original forces shape: {data.forces.shape}")
-        if 'forces' in pseudo and pseudo['forces'] is not None:
-            logging.info(f"Pseudo forces shape: {pseudo['forces'].shape}")
-    
-    pseudolabeled_count = 0
-    for i, (data, pseudo) in enumerate(zip(dataset, pseudolabels)):
-        try:
-            # Apply energy pseudolabel - make sure it's a scalar
-            if 'energy' in pseudo and pseudo['energy'] is not None:
-                # Convert energy to scalar if it's a tensor
-                if isinstance(pseudo['energy'], torch.Tensor):
-                    if pseudo['energy'].numel() == 1:
-                        data.energy = pseudo['energy'].view([])  # Make it a scalar
-                    elif pseudo['energy'].numel() > 1:
-                        # If we have multiple values (e.g., per head), get just the one for pt_head
-                        data.energy = pseudo['energy'][0].view([]) if pseudo['energy'].dim() > 0 else pseudo['energy'].view([])
-                else:
-                    data.energy = torch.tensor(pseudo['energy'], dtype=torch.get_default_dtype()).view([])
-            
-            # Apply forces pseudolabel - must match number of atoms in the sample
-            if 'forces' in pseudo and pseudo['forces'] is not None:
-                if hasattr(data, 'forces'):
-                    # Check if shapes match
-                    if data.forces.shape[0] == pseudo['forces'].shape[0]:
-                        data.forces = pseudo['forces']
-                    else:
-                        logging.warning(f"Forces shape mismatch at index {i}. Original: {data.forces.shape}, Pseudo: {pseudo['forces'].shape}. Skipping forces.")
-                        # Don't apply forces if shapes don't match - likely different atom counts
-            
-            # Apply stress pseudolabel
-            if 'stress' in pseudo and pseudo['stress'] is not None and hasattr(data, 'stress'):
-                # Stress should be [1, 3, 3] for AtomicData
-                if pseudo['stress'].shape == (1, 3, 3) or pseudo['stress'].shape == (3, 3):
-                    stress = pseudo['stress']
-                    if stress.shape == (3, 3):
-                        stress = stress.unsqueeze(0)  # Make [1, 3, 3]
-                    data.stress = stress
-                else:
-                    logging.warning(f"Stress shape mismatch at index {i}. Original: {data.stress.shape}, Pseudo: {pseudo['stress'].shape}. Skipping stress.")
-            
-            # Apply virials pseudolabel
-            if 'virials' in pseudo and pseudo['virials'] is not None and hasattr(data, 'virials'):
-                # Virials should be [1, 3, 3] for AtomicData
-                if pseudo['virials'].shape == (1, 3, 3) or pseudo['virials'].shape == (3, 3):
-                    virials = pseudo['virials']
-                    if virials.shape == (3, 3):
-                        virials = virials.unsqueeze(0)  # Make [1, 3, 3]
-                    data.virials = virials
-                else:
-                    logging.warning(f"Virials shape mismatch at index {i}. Original: {data.virials.shape}, Pseudo: {pseudo['virials'].shape}. Skipping virials.")
-            
-            # Apply dipole pseudolabel
-            if 'dipole' in pseudo and pseudo['dipole'] is not None and hasattr(data, 'dipole'):
-                # Dipole should be [1, 3] for AtomicData
-                if pseudo['dipole'].shape == (1, 3) or pseudo['dipole'].shape == (3,):
-                    dipole = pseudo['dipole']
-                    if dipole.shape == (3,):
-                        dipole = dipole.unsqueeze(0)  # Make [1, 3]
-                    data.dipole = dipole
-                else:
-                    logging.warning(f"Dipole shape mismatch at index {i}. Original: {data.dipole.shape}, Pseudo: {pseudo['dipole'].shape}. Skipping dipole.")
-            
-            # Apply charges pseudolabel
-            if 'charges' in pseudo and pseudo['charges'] is not None and hasattr(data, 'charges'):
-                # Charges should be [num_atoms] for AtomicData
-                if pseudo['charges'].shape == data.charges.shape:
-                    data.charges = pseudo['charges']
-                else:
-                    logging.warning(f"Charges shape mismatch at index {i}. Original: {data.charges.shape}, Pseudo: {pseudo['charges'].shape}. Skipping charges.")
-            
-            pseudolabeled_count += 1
-            
-        except Exception as e:
-            logging.error(f"Error applying pseudolabels at index {i}: {str(e)}")
-            # Continue with the next sample rather than failing completely
-            continue
-    
-    logging.info(f"Successfully applied pseudolabels to {pseudolabeled_count}/{len(dataset)} data points")
-    return dataset
+        logging.info(f"Replacing dataset with {len(pseudolabels)} pseudolabeled samples")
+        
+    # Since we now return complete AtomicData objects, we can just replace the dataset
+    return pseudolabels
