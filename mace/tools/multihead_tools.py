@@ -201,7 +201,7 @@ def assemble_mp_data(
 
 
 def get_pseudolabels(model, data_loader, device):
-    """Generate pseudolabels using the foundation model."""
+    """Generate pseudolabels using the foundation model for multihead models."""
     model.eval()
     pseudolabels = []
     
@@ -263,55 +263,38 @@ def get_pseudolabels(model, data_loader, device):
                         if forces.shape[0] == sample_dict['positions'].shape[0]:
                             sample_dict['forces'] = forces
                 
-                # Stress
+                # Stress - for multihead models only
                 if 'stress' in out and out['stress'] is not None:
                     stress_tensor = out['stress'].cpu().detach()
-                    if stress_tensor.dim() == 3 and i < stress_tensor.size(0):  # [batch, 3, 3]
-                        stress = stress_tensor[i].clone()
-                        if stress.shape == (3, 3):
-                            sample_dict['stress'] = stress.unsqueeze(0)
-                    elif stress_tensor.dim() == 4 and i < stress_tensor.size(0):  # [batch, heads, 3, 3] 
+                    if stress_tensor.dim() == 4 and i < stress_tensor.size(0):  # [batch, heads, 3, 3]
                         stress = stress_tensor[i, head_idx].clone()
                         if stress.shape == (3, 3):
                             sample_dict['stress'] = stress.unsqueeze(0)
                 
-                # Virials
+                # Virials - for multihead models only
                 if 'virials' in out and out['virials'] is not None:
                     virials_tensor = out['virials'].cpu().detach()
-                    if virials_tensor.dim() == 3 and i < virials_tensor.size(0):  # [batch, 3, 3]
-                        virials = virials_tensor[i].clone()
-                        if virials.shape == (3, 3):
-                            sample_dict['virials'] = virials.unsqueeze(0)
-                    elif virials_tensor.dim() == 4 and i < virials_tensor.size(0):  # [batch, heads, 3, 3]
+                    if virials_tensor.dim() == 4 and i < virials_tensor.size(0):  # [batch, heads, 3, 3]
                         virials = virials_tensor[i, head_idx].clone()
                         if virials.shape == (3, 3):
                             sample_dict['virials'] = virials.unsqueeze(0)
                 
-                # Dipole
+                # Dipole - for multihead models only
                 if 'dipole' in out and out['dipole'] is not None:
                     dipole_tensor = out['dipole'].cpu().detach()
-                    if dipole_tensor.dim() == 2 and i < dipole_tensor.size(0):  # [batch, 3]
-                        dipole = dipole_tensor[i].clone()
-                        if dipole.shape == (3,):
-                            sample_dict['dipole'] = dipole.unsqueeze(0)
-                    elif dipole_tensor.dim() == 3 and i < dipole_tensor.size(0):  # [batch, heads, 3]
+                    if dipole_tensor.dim() == 3 and i < dipole_tensor.size(0):  # [batch, heads, 3]
                         dipole = dipole_tensor[i, head_idx].clone()
                         if dipole.shape == (3,):
                             sample_dict['dipole'] = dipole.unsqueeze(0)
                 
-                # Charges
+                # Charges - for multihead models only
                 if 'charges' in out and out['charges'] is not None:
                     charges_tensor = out['charges'].cpu().detach()
                     atoms_indices = (batch.batch == i).cpu()
-                    if atoms_indices.any():
-                        if charges_tensor.dim() == 1:  # [total_atoms]
-                            charges = charges_tensor[atoms_indices].clone()
-                            if charges.shape[0] == sample_dict['positions'].shape[0]:
-                                sample_dict['charges'] = charges
-                        elif charges_tensor.dim() == 2:  # [heads, total_atoms]
-                            charges = charges_tensor[head_idx, atoms_indices].clone()
-                            if charges.shape[0] == sample_dict['positions'].shape[0]:
-                                sample_dict['charges'] = charges
+                    if atoms_indices.any() and charges_tensor.dim() == 2:  # [heads, total_atoms]
+                        charges = charges_tensor[head_idx, atoms_indices].clone()
+                        if charges.shape[0] == sample_dict['positions'].shape[0]:
+                            sample_dict['charges'] = charges
                 
                 # Restore the original head value if it was changed
                 if original_head is not None:
