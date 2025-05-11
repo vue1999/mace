@@ -223,7 +223,8 @@ def get_pseudolabels(model, data_loader, device):
         batch = batch.to(device)
         batch_dict = batch.to_dict()
         
-        # Set the head to pt_head for all batch items to ensure consistent output
+        # Store original head values
+        original_head = None
         if 'head' in batch_dict:
             original_head = batch_dict['head'].clone()
             batch_dict['head'] = torch.full_like(batch_dict['head'], head_idx)
@@ -238,117 +239,95 @@ def get_pseudolabels(model, data_loader, device):
                 compute_stress=True
             )
             
-            # -------------------------------------------------------------
-            # Unbatch the model outputs to create per-sample pseudolabels
-            # -------------------------------------------------------------
-            
-            # Now unbatch the results - we need to split batch outputs into individual samples
+            # Extract original samples from the batch
             for i in range(len(batch)):
-                sample_data = batch.get_example(i)
-                sample_idx = i
+                # Get the original sample with all its data
+                original_sample = batch.get_example(i)
                 
-                # Create a copy of the original data to modify with pseudolabels
-                # This ensures we maintain all the required fields for AtomicData
-                pseudo_data = sample_data.clone()
+                # Create a new dictionary with all fields from the original sample
+                sample_dict = original_sample.to_dict()
                 
-                # Extract energy - scalar per sample
+                # Update the fields with pseudolabels from model output
+                # Energy
                 if 'energy' in out and out['energy'] is not None:
                     energy_tensor = out['energy'].cpu().detach()
-                    if energy_tensor.dim() > 0:
-                        if sample_idx < energy_tensor.size(0):
-                            energy = energy_tensor[sample_idx].clone()
-                            # Ensure it's a scalar (0-dimensional tensor)
-                            pseudo_data.energy = energy.view([])
+                    if energy_tensor.dim() > 0 and i < energy_tensor.size(0):
+                        sample_dict['energy'] = energy_tensor[i].view([])
                 
-                # Extract forces - need to extract atoms for this specific sample
+                # Forces
                 if 'forces' in out and out['forces'] is not None:
                     forces_tensor = out['forces'].cpu().detach()
-                    # Extract atoms for this sample using batch.get_example
-                    atoms_indices = (batch.batch == sample_idx).cpu()
+                    atoms_indices = (batch.batch == i).cpu()
                     if atoms_indices.any():
                         forces = forces_tensor[atoms_indices].clone()
-                        if forces.shape[0] == pseudo_data.positions.shape[0]:
-                            pseudo_data.forces = forces
+                        if forces.shape[0] == sample_dict['positions'].shape[0]:
+                            sample_dict['forces'] = forces
                 
-                # Extract stress
+                # Stress
                 if 'stress' in out and out['stress'] is not None:
                     stress_tensor = out['stress'].cpu().detach()
-                    if stress_tensor.dim() == 3:  # [batch, 3, 3]
-                        if sample_idx < stress_tensor.size(0):
-                            stress = stress_tensor[sample_idx].clone()
-                            # Make sure it's [1, 3, 3]
-                            if stress.shape == (3, 3):
-                                stress = stress.unsqueeze(0)
-                            pseudo_data.stress = stress
-                    elif stress_tensor.dim() == 4:  # [batch, heads, 3, 3] 
-                        if sample_idx < stress_tensor.size(0):
-                            stress = stress_tensor[sample_idx, head_idx].clone()
-                            # Make sure it's [1, 3, 3]
-                            if stress.shape == (3, 3):
-                                stress = stress.unsqueeze(0)
-                            pseudo_data.stress = stress
+                    if stress_tensor.dim() == 3 and i < stress_tensor.size(0):  # [batch, 3, 3]
+                        stress = stress_tensor[i].clone()
+                        if stress.shape == (3, 3):
+                            sample_dict['stress'] = stress.unsqueeze(0)
+                    elif stress_tensor.dim() == 4 and i < stress_tensor.size(0):  # [batch, heads, 3, 3] 
+                        stress = stress_tensor[i, head_idx].clone()
+                        if stress.shape == (3, 3):
+                            sample_dict['stress'] = stress.unsqueeze(0)
                 
-                # Extract virials
+                # Virials
                 if 'virials' in out and out['virials'] is not None:
                     virials_tensor = out['virials'].cpu().detach()
-                    if virials_tensor.dim() == 3:  # [batch, 3, 3]
-                        if sample_idx < virials_tensor.size(0):
-                            virials = virials_tensor[sample_idx].clone()
-                            # Make sure it's [1, 3, 3]
-                            if virials.shape == (3, 3):
-                                virials = virials.unsqueeze(0)
-                            pseudo_data.virials = virials
-                    elif virials_tensor.dim() == 4:  # [batch, heads, 3, 3]
-                        if sample_idx < virials_tensor.size(0):
-                            virials = virials_tensor[sample_idx, head_idx].clone()
-                            # Make sure it's [1, 3, 3]
-                            if virials.shape == (3, 3):
-                                virials = virials.unsqueeze(0)
-                            pseudo_data.virials = virials
+                    if virials_tensor.dim() == 3 and i < virials_tensor.size(0):  # [batch, 3, 3]
+                        virials = virials_tensor[i].clone()
+                        if virials.shape == (3, 3):
+                            sample_dict['virials'] = virials.unsqueeze(0)
+                    elif virials_tensor.dim() == 4 and i < virials_tensor.size(0):  # [batch, heads, 3, 3]
+                        virials = virials_tensor[i, head_idx].clone()
+                        if virials.shape == (3, 3):
+                            sample_dict['virials'] = virials.unsqueeze(0)
                 
-                # Extract dipole
+                # Dipole
                 if 'dipole' in out and out['dipole'] is not None:
                     dipole_tensor = out['dipole'].cpu().detach()
-                    if dipole_tensor.dim() == 2:  # [batch, 3]
-                        if sample_idx < dipole_tensor.size(0):
-                            dipole = dipole_tensor[sample_idx].clone()
-                            # Make sure it's [1, 3]
-                            if dipole.shape == (3,):
-                                dipole = dipole.unsqueeze(0)
-                            pseudo_data.dipole = dipole
-                    elif dipole_tensor.dim() == 3:  # [batch, heads, 3]
-                        if sample_idx < dipole_tensor.size(0):
-                            dipole = dipole_tensor[sample_idx, head_idx].clone()
-                            # Make sure it's [1, 3]
-                            if dipole.shape == (3,):
-                                dipole = dipole.unsqueeze(0)
-                            pseudo_data.dipole = dipole
+                    if dipole_tensor.dim() == 2 and i < dipole_tensor.size(0):  # [batch, 3]
+                        dipole = dipole_tensor[i].clone()
+                        if dipole.shape == (3,):
+                            sample_dict['dipole'] = dipole.unsqueeze(0)
+                    elif dipole_tensor.dim() == 3 and i < dipole_tensor.size(0):  # [batch, heads, 3]
+                        dipole = dipole_tensor[i, head_idx].clone()
+                        if dipole.shape == (3,):
+                            sample_dict['dipole'] = dipole.unsqueeze(0)
                 
-                # Extract charges
+                # Charges
                 if 'charges' in out and out['charges'] is not None:
                     charges_tensor = out['charges'].cpu().detach()
-                    # Extract atoms for this sample
-                    atoms_indices = (batch.batch == sample_idx).cpu()
+                    atoms_indices = (batch.batch == i).cpu()
                     if atoms_indices.any():
                         if charges_tensor.dim() == 1:  # [total_atoms]
                             charges = charges_tensor[atoms_indices].clone()
-                            if charges.shape[0] == pseudo_data.positions.shape[0]:
-                                pseudo_data.charges = charges
+                            if charges.shape[0] == sample_dict['positions'].shape[0]:
+                                sample_dict['charges'] = charges
                         elif charges_tensor.dim() == 2:  # [heads, total_atoms]
                             charges = charges_tensor[head_idx, atoms_indices].clone()
-                            if charges.shape[0] == pseudo_data.positions.shape[0]:
-                                pseudo_data.charges = charges
+                            if charges.shape[0] == sample_dict['positions'].shape[0]:
+                                sample_dict['charges'] = charges
                 
-                # Append the complete AtomicData object with pseudolabels
+                # Restore the original head value if it was changed
+                if original_head is not None:
+                    sample_dict['head'] = original_head[i].clone()
+                
+                # Create a new AtomicData object from the dictionary
+                from mace.data import AtomicData
+                pseudo_data = AtomicData.from_dict(sample_dict)
+                
+                # Append the complete AtomicData object
                 pseudolabels.append(pseudo_data)
                 
         except RuntimeError as e:
             logging.error(f"Error generating pseudolabels: {str(e)}")
+            continue
         
-        # Restore the original head values if they were changed
-        if 'head' in batch_dict and 'original_head' in locals():
-            batch_dict['head'] = original_head
-    
     # Restore original requires_grad settings for model parameters
     for name, param in model.named_parameters():
         if name in original_requires_grad:
@@ -359,6 +338,10 @@ def get_pseudolabels(model, data_loader, device):
 
 def apply_pseudolabels(dataset, pseudolabels):
     """Replace original values with pseudolabels in the dataset."""
+    if len(pseudolabels) == 0:
+        logging.warning("No pseudolabels generated. Continuing with original dataset.")
+        return dataset
+        
     if len(dataset) != len(pseudolabels):
         logging.warning(f"Dataset length ({len(dataset)}) does not match pseudolabels length ({len(pseudolabels)}). "
                        f"This may indicate a problem with batch processing.")
@@ -369,7 +352,36 @@ def apply_pseudolabels(dataset, pseudolabels):
     
     # Log some information about the pseudolabeled data
     if len(dataset) > 0 and len(pseudolabels) > 0:
-        logging.info(f"Replacing dataset with {len(pseudolabels)} pseudolabeled samples")
-        
-    # Since we now return complete AtomicData objects, we can just replace the dataset
-    return pseudolabels
+        try:
+            # Verify that pseudolabels have all required fields
+            first_pseudo = pseudolabels[0]
+            first_orig = dataset[0]
+            
+            # Log the keys to help with debugging
+            pseudo_keys = sorted(first_pseudo.keys)
+            orig_keys = sorted(first_orig.keys)
+            
+            if set(orig_keys) != set(pseudo_keys):
+                missing_keys = set(orig_keys) - set(pseudo_keys)
+                extra_keys = set(pseudo_keys) - set(orig_keys)
+                
+                if missing_keys:
+                    logging.error(f"Pseudolabels missing required keys: {missing_keys}")
+                
+                if extra_keys:
+                    logging.warning(f"Pseudolabels contain extra keys: {extra_keys}")
+                
+                # If there are missing keys, we'll use the original dataset
+                if missing_keys:
+                    logging.warning("Using original dataset due to missing keys in pseudolabels")
+                    return dataset
+            
+            logging.info(f"Replacing dataset with {len(pseudolabels)} pseudolabeled samples")
+            return pseudolabels
+            
+        except Exception as e:
+            logging.error(f"Error validating pseudolabels: {str(e)}")
+            logging.warning("Using original dataset due to error in pseudolabels")
+            return dataset
+    
+    return dataset
