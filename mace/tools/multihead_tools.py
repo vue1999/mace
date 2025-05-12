@@ -201,15 +201,18 @@ def assemble_mp_data(
 
 
 def get_pseudolabels(model, data_loader, device):
-    """Generate pseudolabels using the foundation model for multihead models."""
+    """Generate pseudolabels using the foundation model for multihead models.
+    Returns a list of modified data samples with pseudolabels.
+    """
     model.eval()
-    pseudolabels = []
+    samples_with_pseudolabels = []
     
-    # Disable gradient tracking for model parameters while keeping gradients for input tensors
+    # Disable gradient tracking for model parameters, but keep gradient tracking
+    # for positional inputs to allow force/stress calculation
     original_requires_grad = {}
-    for name, param in model.named_parameters():
-        original_requires_grad[name] = param.requires_grad
-        param.requires_grad_(False)
+    for param in model.parameters():
+        original_requires_grad[param] = param.requires_grad
+        param.requires_grad = False
     
     # Get the index of pt_head if available
     try:
@@ -223,14 +226,8 @@ def get_pseudolabels(model, data_loader, device):
         batch = batch.to(device)
         batch_dict = batch.to_dict()
         
-        # Store original head values
-        original_head = None
-        if 'head' in batch_dict:
-            original_head = batch_dict['head'].clone()
-            batch_dict['head'] = torch.full_like(batch_dict['head'], head_idx)
-        
         try:
-            # Run the model with forces computation enabled
+            # Run the model with forces, virials, and stress computation enabled
             out = model(
                 batch_dict,
                 training=False,
@@ -239,132 +236,79 @@ def get_pseudolabels(model, data_loader, device):
                 compute_stress=True
             )
             
-            # Extract original samples from the batch
+            # Get the original samples to modify with pseudolabels
             for i in range(len(batch)):
-                # Get the original sample with all its data
-                original_sample = batch.get_example(i)
+                # Get the original sample
+                sample = batch.get_example(i)
                 
-                # Create a new dictionary with all fields from the original sample
-                sample_dict = original_sample.to_dict()
-                
-                # Update the fields with pseudolabels from model output
-                # Energy
+                # Energy pseudolabel
                 if 'energy' in out and out['energy'] is not None:
-                    energy_tensor = out['energy'].cpu().detach()
+                    energy_tensor = out['energy']
                     if energy_tensor.dim() > 0 and i < energy_tensor.size(0):
-                        sample_dict['energy'] = energy_tensor[i].view([])
+                        sample.energy = energy_tensor[i].view([])
                 
-                # Forces
+                # Forces pseudolabel
                 if 'forces' in out and out['forces'] is not None:
-                    forces_tensor = out['forces'].cpu().detach()
-                    atoms_indices = (batch.batch == i).cpu()
+                    forces_tensor = out['forces']
+                    atoms_indices = (batch.batch == i)
                     if atoms_indices.any():
-                        forces = forces_tensor[atoms_indices].clone()
-                        if forces.shape[0] == sample_dict['positions'].shape[0]:
-                            sample_dict['forces'] = forces
+                        forces = forces_tensor[atoms_indices]
+                        if forces.shape[0] == sample.positions.shape[0]:
+                            sample.forces = forces
                 
-                # Stress - for multihead models only
+                # Stress pseudolabel - for multihead models
                 if 'stress' in out and out['stress'] is not None:
-                    stress_tensor = out['stress'].cpu().detach()
+                    stress_tensor = out['stress']
                     if stress_tensor.dim() == 4 and i < stress_tensor.size(0):  # [batch, heads, 3, 3]
-                        stress = stress_tensor[i, head_idx].clone()
+                        stress = stress_tensor[i, head_idx]
                         if stress.shape == (3, 3):
-                            sample_dict['stress'] = stress.unsqueeze(0)
+                            sample.stress = stress.unsqueeze(0)
                 
-                # Virials - for multihead models only
+                # Virials pseudolabel - for multihead models
                 if 'virials' in out and out['virials'] is not None:
-                    virials_tensor = out['virials'].cpu().detach()
+                    virials_tensor = out['virials']
                     if virials_tensor.dim() == 4 and i < virials_tensor.size(0):  # [batch, heads, 3, 3]
-                        virials = virials_tensor[i, head_idx].clone()
+                        virials = virials_tensor[i, head_idx]
                         if virials.shape == (3, 3):
-                            sample_dict['virials'] = virials.unsqueeze(0)
+                            sample.virials = virials.unsqueeze(0)
                 
-                # Dipole - for multihead models only
+                # Dipole pseudolabel - for multihead models
                 if 'dipole' in out and out['dipole'] is not None:
-                    dipole_tensor = out['dipole'].cpu().detach()
+                    dipole_tensor = out['dipole']
                     if dipole_tensor.dim() == 3 and i < dipole_tensor.size(0):  # [batch, heads, 3]
-                        dipole = dipole_tensor[i, head_idx].clone()
+                        dipole = dipole_tensor[i, head_idx]
                         if dipole.shape == (3,):
-                            sample_dict['dipole'] = dipole.unsqueeze(0)
+                            sample.dipole = dipole.unsqueeze(0)
                 
-                # Charges - for multihead models only
+                # Charges pseudolabel - for multihead models
                 if 'charges' in out and out['charges'] is not None:
-                    charges_tensor = out['charges'].cpu().detach()
-                    atoms_indices = (batch.batch == i).cpu()
+                    charges_tensor = out['charges']
+                    atoms_indices = (batch.batch == i)
                     if atoms_indices.any() and charges_tensor.dim() == 2:  # [heads, total_atoms]
-                        charges = charges_tensor[head_idx, atoms_indices].clone()
-                        if charges.shape[0] == sample_dict['positions'].shape[0]:
-                            sample_dict['charges'] = charges
+                        charges = charges_tensor[head_idx, atoms_indices]
+                        if charges.shape[0] == sample.positions.shape[0]:
+                            sample.charges = charges
                 
-                # Restore the original head value if it was changed
-                if original_head is not None:
-                    sample_dict['head'] = original_head[i].clone()
-                
-                # Create a new AtomicData object from the dictionary
-                from mace.data import AtomicData
-                pseudo_data = AtomicData.from_dict(sample_dict)
-                
-                # Append the complete AtomicData object
-                pseudolabels.append(pseudo_data)
+                # Add to our collection
+                samples_with_pseudolabels.append(sample.to("cpu"))
                 
         except RuntimeError as e:
             logging.error(f"Error generating pseudolabels: {str(e)}")
             continue
-        
-    # Restore original requires_grad settings for model parameters
-    for name, param in model.named_parameters():
-        if name in original_requires_grad:
-            param.requires_grad_(original_requires_grad[name])
     
-    logging.info(f"Generated {len(pseudolabels)} pseudolabels from {len(data_loader)} batches")
-    return pseudolabels
+    # Restore original requires_grad settings for model parameters
+    for param, requires_grad in original_requires_grad.items():
+        param.requires_grad = requires_grad
+    
+    logging.info(f"Generated pseudolabels for {len(samples_with_pseudolabels)} samples from {len(data_loader)} batches")
+    return samples_with_pseudolabels
 
 def apply_pseudolabels(dataset, pseudolabels):
-    """Replace original values with pseudolabels in the dataset."""
+    """Replace the dataset with pseudolabeled data."""
     if len(pseudolabels) == 0:
         logging.warning("No pseudolabels generated. Continuing with original dataset.")
         return dataset
-        
-    if len(dataset) != len(pseudolabels):
-        logging.warning(f"Dataset length ({len(dataset)}) does not match pseudolabels length ({len(pseudolabels)}). "
-                       f"This may indicate a problem with batch processing.")
-        # Truncate to the shorter length to avoid errors
-        min_length = min(len(dataset), len(pseudolabels))
-        dataset = dataset[:min_length]
-        pseudolabels = pseudolabels[:min_length]
     
-    # Log some information about the pseudolabeled data
-    if len(dataset) > 0 and len(pseudolabels) > 0:
-        try:
-            # Verify that pseudolabels have all required fields
-            first_pseudo = pseudolabels[0]
-            first_orig = dataset[0]
-            
-            # Log the keys to help with debugging
-            pseudo_keys = sorted(first_pseudo.keys)
-            orig_keys = sorted(first_orig.keys)
-            
-            if set(orig_keys) != set(pseudo_keys):
-                missing_keys = set(orig_keys) - set(pseudo_keys)
-                extra_keys = set(pseudo_keys) - set(orig_keys)
-                
-                if missing_keys:
-                    logging.error(f"Pseudolabels missing required keys: {missing_keys}")
-                
-                if extra_keys:
-                    logging.warning(f"Pseudolabels contain extra keys: {extra_keys}")
-                
-                # If there are missing keys, we'll use the original dataset
-                if missing_keys:
-                    logging.warning("Using original dataset due to missing keys in pseudolabels")
-                    return dataset
-            
-            logging.info(f"Replacing dataset with {len(pseudolabels)} pseudolabeled samples")
-            return pseudolabels
-            
-        except Exception as e:
-            logging.error(f"Error validating pseudolabels: {str(e)}")
-            logging.warning("Using original dataset due to error in pseudolabels")
-            return dataset
-    
-    return dataset
+    # Simply return the pseudolabeled dataset
+    logging.info(f"Applied pseudolabels to {len(pseudolabels)} samples")
+    return pseudolabels
