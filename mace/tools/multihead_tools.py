@@ -205,7 +205,7 @@ def get_pseudolabels(model, data_loader, device):
     Returns a list of modified data samples with pseudolabels.
     """
     model.eval()
-    samples_with_pseudolabels = []
+    all_batches_with_pseudolabels = []
     
     # Disable gradient tracking for model parameters, but keep gradient tracking
     # for positional inputs to allow force/stress calculation
@@ -236,61 +236,51 @@ def get_pseudolabels(model, data_loader, device):
                 compute_stress=True
             )
             
-            # Get the original samples to modify with pseudolabels
-            for i in range(len(batch)):
-                # Get the original sample
-                sample = batch.get_example(i)
-                
-                # Energy pseudolabel
-                if 'energy' in out and out['energy'] is not None:
-                    energy_tensor = out['energy']
-                    if energy_tensor.dim() > 0 and i < energy_tensor.size(0):
-                        sample.energy = energy_tensor[i].view([])
-                
-                # Forces pseudolabel
-                if 'forces' in out and out['forces'] is not None:
-                    forces_tensor = out['forces']
-                    atoms_indices = (batch.batch == i)
-                    if atoms_indices.any():
-                        forces = forces_tensor[atoms_indices]
-                        if forces.shape[0] == sample.positions.shape[0]:
-                            sample.forces = forces
-                
-                # Stress pseudolabel - for multihead models
-                if 'stress' in out and out['stress'] is not None:
-                    stress_tensor = out['stress']
-                    if stress_tensor.dim() == 4 and i < stress_tensor.size(0):  # [batch, heads, 3, 3]
-                        stress = stress_tensor[i, head_idx]
-                        if stress.shape == (3, 3):
-                            sample.stress = stress.unsqueeze(0)
-                
-                # Virials pseudolabel - for multihead models
-                if 'virials' in out and out['virials'] is not None:
-                    virials_tensor = out['virials']
-                    if virials_tensor.dim() == 4 and i < virials_tensor.size(0):  # [batch, heads, 3, 3]
-                        virials = virials_tensor[i, head_idx]
-                        if virials.shape == (3, 3):
-                            sample.virials = virials.unsqueeze(0)
-                
-                # Dipole pseudolabel - for multihead models
-                if 'dipole' in out and out['dipole'] is not None:
-                    dipole_tensor = out['dipole']
-                    if dipole_tensor.dim() == 3 and i < dipole_tensor.size(0):  # [batch, heads, 3]
-                        dipole = dipole_tensor[i, head_idx]
-                        if dipole.shape == (3,):
-                            sample.dipole = dipole.unsqueeze(0)
-                
-                # Charges pseudolabel - for multihead models
-                if 'charges' in out and out['charges'] is not None:
-                    charges_tensor = out['charges']
-                    atoms_indices = (batch.batch == i)
-                    if atoms_indices.any() and charges_tensor.dim() == 2:  # [heads, total_atoms]
-                        charges = charges_tensor[head_idx, atoms_indices]
-                        if charges.shape[0] == sample.positions.shape[0]:
-                            sample.charges = charges
-                
-                # Add to our collection
-                samples_with_pseudolabels.append(sample.to("cpu"))
+            # Create a copy of batch to add pseudolabels
+            batch_with_labels = batch.clone()
+            
+            # Energy pseudolabel (per graph)
+            if 'energy' in out and out['energy'] is not None:
+                batch_with_labels.energy = out['energy']
+            
+            # Forces pseudolabel (per atom)
+            if 'forces' in out and out['forces'] is not None:
+                batch_with_labels.forces = out['forces']
+            
+            # Stress pseudolabel (per graph)
+            if 'stress' in out and out['stress'] is not None:
+                # Select the specific head's stress predictions
+                if out['stress'].dim() == 4:  # [batch, heads, 3, 3]
+                    batch_with_labels.stress = out['stress'][:, head_idx]
+                else:
+                    batch_with_labels.stress = out['stress']
+            
+            # Virials pseudolabel (per graph)
+            if 'virials' in out and out['virials'] is not None:
+                # Select the specific head's virials predictions
+                if out['virials'].dim() == 4:  # [batch, heads, 3, 3]
+                    batch_with_labels.virials = out['virials'][:, head_idx]
+                else:
+                    batch_with_labels.virials = out['virials']
+            
+            # Dipole pseudolabel (per graph)
+            if 'dipole' in out and out['dipole'] is not None:
+                # Select the specific head's dipole predictions
+                if out['dipole'].dim() == 3:  # [batch, heads, 3]
+                    batch_with_labels.dipole = out['dipole'][:, head_idx]
+                else:
+                    batch_with_labels.dipole = out['dipole']
+            
+            # Charges pseudolabel (per atom)
+            if 'charges' in out and out['charges'] is not None:
+                # Select the specific head's charges predictions
+                if out['charges'].dim() == 2:  # [heads, total_atoms]
+                    batch_with_labels.charges = out['charges'][head_idx]
+                else:
+                    batch_with_labels.charges = out['charges']
+            
+            # Add this batch to our collection
+            all_batches_with_pseudolabels.append(batch_with_labels.to("cpu"))
                 
         except RuntimeError as e:
             logging.error(f"Error generating pseudolabels: {str(e)}")
@@ -300,7 +290,12 @@ def get_pseudolabels(model, data_loader, device):
     for param, requires_grad in original_requires_grad.items():
         param.requires_grad = requires_grad
     
-    logging.info(f"Generated pseudolabels for {len(samples_with_pseudolabels)} samples from {len(data_loader)} batches")
+    # Convert all batches to a list of data objects
+    samples_with_pseudolabels = []
+    for batch in all_batches_with_pseudolabels:
+        samples_with_pseudolabels.extend(batch.to_data_list())
+    
+    logging.info(f"Generated pseudolabels for {len(samples_with_pseudolabels)} samples")
     return samples_with_pseudolabels
 
 def apply_pseudolabels(dataset, pseudolabels):
