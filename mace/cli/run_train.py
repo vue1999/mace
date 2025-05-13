@@ -36,8 +36,7 @@ from mace.tools.multihead_tools import (
     dict_head_to_dataclass,
     prepare_default_head,
     prepare_pt_head,
-    get_pseudolabels,
-    apply_pseudolabels,
+    generate_pseudolabels_for_configs,
 )
 from mace.tools.run_train_utils import (
     combine_datasets,
@@ -576,6 +575,8 @@ def run(args) -> None:
         if not valid_sets[head_config.head_name]:
             raise ValueError(f"No valid datasets found for head {head_config.head_name}, please provide a valid_file or a valid_fraction")
 
+    # Create individual head dataloaders 
+    for head_config in head_configs:
         # Create data loader for this head
         if isinstance(train_sets[head_config.head_name], list):
             dataset_size = len(train_sets[head_config.head_name])
@@ -617,6 +618,8 @@ def run(args) -> None:
                 seed=args.seed,
             )
             valid_samplers[head] = valid_sampler
+    
+    # Create train_loader with original data for model configuration
     train_loader = torch_geometric.dataloader.DataLoader(
         dataset=train_set,
         batch_size=args.batch_size,
@@ -627,6 +630,8 @@ def run(args) -> None:
         num_workers=args.num_workers,
         generator=torch.Generator().manual_seed(args.seed),
     )
+    
+    # Create validation loaders
     valid_loaders = {heads[i]: None for i in range(len(heads))}
     if not isinstance(valid_sets, dict):
         valid_sets = {"Default": valid_sets}
@@ -653,26 +658,74 @@ def run(args) -> None:
     if args.pseudolabel_replay and args.multiheads_finetuning:
         try:
             logging.info("Generating pseudolabels for replay data using foundation model")
-            pt_head_data = train_sets["pt_head"]
-            pt_head_loader = torch_geometric.dataloader.DataLoader(
-                dataset=pt_head_data,
-                batch_size=args.batch_size,
-                shuffle=False,
-                drop_last=False,
-                pin_memory=args.pin_memory,
-                num_workers=args.num_workers,
-            )
             
-            pseudolabels = get_pseudolabels(model, pt_head_loader, device)
+            # Get the head config for pt_head
+            pt_head_config = next(filter(lambda x: x.head_name == "pt_head", head_configs), None)
             
-            # Check if pseudolabels were generated successfully
-            if not pseudolabels:
-                logging.warning("No pseudolabels were generated. Continuing without pseudolabeling.")
+            if pt_head_config is None:
+                logging.warning("Could not find pt_head configuration. Continuing without pseudolabeling.")
+            elif not hasattr(pt_head_config, 'collections') or not pt_head_config.collections:
+                logging.warning("No collections found in pt_head config. Continuing without pseudolabeling.")
             else:
-                train_sets["pt_head"] = apply_pseudolabels(pt_head_data, pseudolabels)
-                logging.info("Successfully applied pseudolabels to replay data")
-
-                # Recreate concatenated dataset and data loader with pseudolabeled data
+                # Generate pseudolabels for training configs
+                logging.info(f"Generating pseudolabels for {len(pt_head_config.collections.train)} pt_head training configurations")
+                updated_train_configs = generate_pseudolabels_for_configs(
+                    model=model,
+                    configs=pt_head_config.collections.train,
+                    z_table=z_table,
+                    r_max=args.r_max,
+                    heads=heads,
+                    device=device,
+                    batch_size=args.batch_size
+                )
+                
+                # Replace the original configurations with updated ones
+                pt_head_config.collections.train = updated_train_configs
+                
+                # Generate pseudolabels for validation configs if they exist
+                if pt_head_config.collections.valid:
+                    logging.info(f"Generating pseudolabels for {len(pt_head_config.collections.valid)} pt_head validation configurations")
+                    updated_valid_configs = generate_pseudolabels_for_configs(
+                        model=model,
+                        configs=pt_head_config.collections.valid,
+                        z_table=z_table,
+                        r_max=args.r_max,
+                        heads=heads,
+                        device=device,
+                        batch_size=args.valid_batch_size
+                    )
+                    
+                    # Replace the original configurations with updated ones
+                    pt_head_config.collections.valid = updated_valid_configs
+                
+                # Re-create AtomicData datasets from updated configurations
+                logging.info("Creating new datasets with pseudolabeled configurations")
+                train_sets["pt_head"] = [
+                    data.AtomicData.from_config(
+                        config, z_table=z_table, cutoff=args.r_max, heads=heads
+                    ) for config in pt_head_config.collections.train
+                ]
+                
+                if pt_head_config.collections.valid:
+                    valid_sets["pt_head"] = [
+                        data.AtomicData.from_config(
+                            config, z_table=z_table, cutoff=args.r_max, heads=heads
+                        ) for config in pt_head_config.collections.valid
+                    ]
+                
+                # Update the pt_head train_loader
+                train_loader_head = torch_geometric.dataloader.DataLoader(
+                    dataset=train_sets["pt_head"],
+                    batch_size=args.batch_size,
+                    shuffle=True,
+                    drop_last=(not args.lbfgs),
+                    pin_memory=args.pin_memory,
+                    num_workers=args.num_workers,
+                    generator=torch.Generator().manual_seed(args.seed),
+                )
+                pt_head_config.train_loader = train_loader_head
+                
+                # Recreate the combined train_loader with the updated pt_head dataset
                 train_set = ConcatDataset([train_sets[head] for head in heads])
                 train_loader = torch_geometric.dataloader.DataLoader(
                     dataset=train_set,
@@ -684,6 +737,22 @@ def run(args) -> None:
                     num_workers=args.num_workers,
                     generator=torch.Generator().manual_seed(args.seed),
                 )
+                
+                # Update validation loader for pt_head if needed
+                if pt_head_config.collections.valid:
+                    valid_loaders["pt_head"] = torch_geometric.dataloader.DataLoader(
+                        dataset=valid_sets["pt_head"],
+                        batch_size=args.valid_batch_size,
+                        sampler=valid_samplers.get("pt_head") if args.distributed else None,
+                        shuffle=False,
+                        drop_last=False,
+                        pin_memory=args.pin_memory,
+                        num_workers=args.num_workers,
+                        generator=torch.Generator().manual_seed(args.seed),
+                    )
+                
+                logging.info("Successfully applied pseudolabels to replay data")
+                
         except Exception as e:
             logging.error(f"Error in pseudolabeling process: {str(e)}")
             logging.warning("Continuing without pseudolabeling.")

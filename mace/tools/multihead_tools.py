@@ -201,15 +201,30 @@ def assemble_mp_data(
         ) from exc
 
 
-def get_pseudolabels(model, data_loader, device):
-    """Generate pseudolabels using the foundation model for multihead models.
-    Returns a list of modified data samples with pseudolabels.
+def generate_pseudolabels_for_configs(model, configs, z_table, r_max, heads, device, batch_size=32):
     """
-    model.eval()
-    all_batches_with_pseudolabels = []
+    Generate pseudolabels for a list of Configuration objects.
     
-    # Disable gradient tracking for model parameters, but keep gradient tracking
-    # for positional inputs to allow force/stress calculation
+    Args:
+        model: The foundation model
+        configs: List of Configuration objects
+        z_table: Atomic number table
+        r_max: Cutoff radius
+        heads: List of head names
+        device: Device to run model on
+        batch_size: Batch size for inference
+        
+    Returns:
+        List of Configuration objects with updated properties
+    """
+    import torch
+    from mace import data
+    from mace.tools import torch_geometric
+    
+    model.eval()
+    updated_configs = []
+    
+    # Disable gradient tracking for model parameters
     original_requires_grad = {}
     for param in model.parameters():
         original_requires_grad[param] = param.requires_grad
@@ -223,90 +238,92 @@ def get_pseudolabels(model, data_loader, device):
         head_idx = 0
         logging.warning("Could not find 'pt_head', using index 0 instead for pseudolabeling")
     
-    for batch in data_loader:
-        batch = batch.to(device)
+    # Process configs in batches to avoid memory issues
+    for i in range(0, len(configs), batch_size):
+        batch_configs = configs[i:i+batch_size]
+        
+        # Create temporary AtomicData objects for this batch
+        batch_data = [
+            data.AtomicData.from_config(
+                config, z_table=z_table, cutoff=r_max, heads=heads
+            ) for config in batch_configs
+        ]
+        
+        # Create a batch for model inference
+        batch = torch_geometric.data.Batch.from_data_list(batch_data).to(device)
         batch_dict = batch.to_dict()
         
         try:
-            # Run the model with forces, virials, and stress computation enabled
+            # Run model inference with computation of all properties
             out = model(
-                batch_dict,
+                batch_dict, 
                 training=False,
                 compute_force=True,
                 compute_virials=True,
                 compute_stress=True
             )
             
-            # Create a copy of batch to add pseudolabels
-            logging.info(f"Batch: {batch}")
-            batch_with_labels = deepcopy(batch)
-            logging.info(f"Batch with labels: {batch_with_labels}")
-            
-            # Energy pseudolabel (per graph)
-            if 'energy' in out and out['energy'] is not None:
-                batch_with_labels.energy = out['energy']
-            
-            # Forces pseudolabel (per atom)
-            if 'forces' in out and out['forces'] is not None:
-                batch_with_labels.forces = out['forces']
-            
-            # Stress pseudolabel (per graph)
-            if 'stress' in out and out['stress'] is not None:
-                # Select the specific head's stress predictions
-                if out['stress'].dim() == 4:  # [batch, heads, 3, 3]
-                    batch_with_labels.stress = out['stress'][:, head_idx]
-                else:
-                    batch_with_labels.stress = out['stress']
-            
-            # Virials pseudolabel (per graph)
-            if 'virials' in out and out['virials'] is not None:
-                # Select the specific head's virials predictions
-                if out['virials'].dim() == 4:  # [batch, heads, 3, 3]
-                    batch_with_labels.virials = out['virials'][:, head_idx]
-                else:
-                    batch_with_labels.virials = out['virials']
-            
-            # Dipole pseudolabel (per graph)
-            if 'dipole' in out and out['dipole'] is not None:
-                # Select the specific head's dipole predictions
-                if out['dipole'].dim() == 3:  # [batch, heads, 3]
-                    batch_with_labels.dipole = out['dipole'][:, head_idx]
-                else:
-                    batch_with_labels.dipole = out['dipole']
-            
-            # Charges pseudolabel (per atom)
-            if 'charges' in out and out['charges'] is not None:
-                # Select the specific head's charges predictions
-                if out['charges'].dim() == 2:  # [heads, total_atoms]
-                    batch_with_labels.charges = out['charges'][head_idx]
-                else:
-                    batch_with_labels.charges = out['charges']
-            
-            # Add this batch to our collection
-            all_batches_with_pseudolabels.append(batch_with_labels.to("cpu"))
+            # Process each configuration in the batch
+            for j, config in enumerate(batch_configs):
+                # Create a deep copy to avoid modifying the original
+                config_copy = deepcopy(config)
+                
+                # Update config properties with pseudolabels
+                if 'energy' in out and out['energy'] is not None:
+                    if out['energy'].dim() > 1:  # Multiple heads
+                        config_copy.properties['energy'] = out['energy'][j, head_idx].detach().cpu().item()
+                    else:
+                        config_copy.properties['energy'] = out['energy'][j].detach().cpu().item()
+                
+                if 'forces' in out and out['forces'] is not None:
+                    # Extract forces for this configuration
+                    node_start = batch.ptr[j].item()
+                    node_end = batch.ptr[j+1].item()
+                    
+                    if out['forces'].dim() > 2:  # Multiple heads
+                        config_copy.properties['forces'] = out['forces'][node_start:node_end, head_idx].detach().cpu().numpy()
+                    else:
+                        config_copy.properties['forces'] = out['forces'][node_start:node_end].detach().cpu().numpy()
+                
+                # Add other property updates
+                if 'stress' in out and out['stress'] is not None:
+                    if out['stress'].dim() == 4:  # [batch, heads, 3, 3]
+                        config_copy.properties['stress'] = out['stress'][j, head_idx].detach().cpu().numpy()
+                    else:
+                        config_copy.properties['stress'] = out['stress'][j].detach().cpu().numpy()
+                
+                if 'virials' in out and out['virials'] is not None:
+                    if out['virials'].dim() == 4:  # [batch, heads, 3, 3]
+                        config_copy.properties['virials'] = out['virials'][j, head_idx].detach().cpu().numpy()
+                    else:
+                        config_copy.properties['virials'] = out['virials'][j].detach().cpu().numpy()
+                        
+                if 'dipole' in out and out['dipole'] is not None:
+                    if out['dipole'].dim() == 3:  # [batch, heads, 3]
+                        config_copy.properties['dipole'] = out['dipole'][j, head_idx].detach().cpu().numpy()
+                    else:
+                        config_copy.properties['dipole'] = out['dipole'][j].detach().cpu().numpy()
+                
+                if 'charges' in out and out['charges'] is not None:
+                    # Charges are per atom
+                    node_start = batch.ptr[j].item()
+                    node_end = batch.ptr[j+1].item()
+                    
+                    if out['charges'].dim() > 1:  # Multiple heads
+                        config_copy.properties['charges'] = out['charges'][head_idx, node_start:node_end].detach().cpu().numpy()
+                    else:
+                        config_copy.properties['charges'] = out['charges'][node_start:node_end].detach().cpu().numpy()
+                        
+                updated_configs.append(config_copy)
                 
         except RuntimeError as e:
             logging.error(f"Error generating pseudolabels: {str(e)}")
-            continue
+            # On error, return the original configs for this batch
+            updated_configs.extend(batch_configs)
     
-    # Restore original requires_grad settings for model parameters
+    # Restore original requires_grad settings
     for param, requires_grad in original_requires_grad.items():
         param.requires_grad = requires_grad
     
-    # Convert all batches to a list of data objects
-    samples_with_pseudolabels = []
-    for batch in all_batches_with_pseudolabels:
-        samples_with_pseudolabels.extend(batch.to_data_list())
-    
-    logging.info(f"Generated pseudolabels for {len(samples_with_pseudolabels)} samples")
-    return samples_with_pseudolabels
-
-def apply_pseudolabels(dataset, pseudolabels):
-    """Replace the dataset with pseudolabeled data."""
-    if len(pseudolabels) == 0:
-        logging.warning("No pseudolabels generated. Continuing with original dataset.")
-        return dataset
-    
-    # Simply return the pseudolabeled dataset
-    logging.info(f"Applied pseudolabels to {len(pseudolabels)} samples")
-    return pseudolabels
+    logging.info(f"Generated pseudolabels for {len(updated_configs)} configurations")
+    return updated_configs
