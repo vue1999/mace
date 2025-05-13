@@ -6,6 +6,7 @@ import os
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+from copy import deepcopy
 
 import torch
 
@@ -238,7 +239,7 @@ def get_pseudolabels(model, data_loader, device):
             
             # Create a copy of batch to add pseudolabels
             logging.info(f"Batch: {batch}")
-            batch_with_labels = batch.clone()
+            batch_with_labels = deepcopy(batch)
             logging.info(f"Batch with labels: {batch_with_labels}")
             
             # Energy pseudolabel (per graph)
