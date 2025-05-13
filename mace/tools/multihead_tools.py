@@ -237,7 +237,9 @@ def get_pseudolabels(model, data_loader, device):
             )
             
             # Create a copy of batch to add pseudolabels
+            logging.info(f"Batch: {batch}")
             batch_with_labels = batch.clone()
+            logging.info(f"Batch with labels: {batch_with_labels}")
             
             # Energy pseudolabel (per graph)
             if 'energy' in out and out['energy'] is not None:
