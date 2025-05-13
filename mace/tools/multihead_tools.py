@@ -204,7 +204,6 @@ def get_pseudolabels(model, data_loader, device):
     """Generate pseudolabels using the foundation model for multihead models.
     Returns a list of modified data samples with pseudolabels.
     """
-    logging.info("Starting get_pseudolabels function")
     model.eval()
     samples_with_pseudolabels = []
     
@@ -223,20 +222,12 @@ def get_pseudolabels(model, data_loader, device):
         head_idx = 0
         logging.warning("Could not find 'pt_head', using index 0 instead for pseudolabeling")
     
-    batch_count = 0
     for batch in data_loader:
-        batch_count += 1
-        logging.info(f"Processing batch {batch_count} with {len(batch)} samples")
-        logging.info(f"Batch type: {type(batch)}")
-        logging.info(f"Batch attributes: {dir(batch)}")
-        
         batch = batch.to(device)
         batch_dict = batch.to_dict()
-        logging.info(f"Batch dict keys: {batch_dict.keys()}")
         
         try:
             # Run the model with forces, virials, and stress computation enabled
-            logging.info("Running model forward pass with compute_force, compute_virials, and compute_stress enabled")
             out = model(
                 batch_dict,
                 training=False,
@@ -244,22 +235,17 @@ def get_pseudolabels(model, data_loader, device):
                 compute_virials=True,
                 compute_stress=True
             )
-            logging.info(f"Model output keys: {out.keys()}")
             
             # Get the original samples to modify with pseudolabels
             for i in range(len(batch)):
-                logging.info(f"Processing sample {i} from batch")
                 # Get the original sample
                 sample = batch.get_example(i)
-                logging.info(f"Sample type: {type(sample)}")
-                logging.info(f"Sample attributes: {dir(sample)}")
                 
                 # Energy pseudolabel
                 if 'energy' in out and out['energy'] is not None:
                     energy_tensor = out['energy']
                     if energy_tensor.dim() > 0 and i < energy_tensor.size(0):
                         sample.energy = energy_tensor[i].view([])
-                        logging.info(f"Set energy pseudolabel: {sample.energy}")
                 
                 # Forces pseudolabel
                 if 'forces' in out and out['forces'] is not None:
@@ -269,7 +255,6 @@ def get_pseudolabels(model, data_loader, device):
                         forces = forces_tensor[atoms_indices]
                         if forces.shape[0] == sample.positions.shape[0]:
                             sample.forces = forces
-                            logging.info(f"Set forces pseudolabel with shape: {sample.forces.shape}")
                 
                 # Stress pseudolabel - for multihead models
                 if 'stress' in out and out['stress'] is not None:
@@ -278,7 +263,6 @@ def get_pseudolabels(model, data_loader, device):
                         stress = stress_tensor[i, head_idx]
                         if stress.shape == (3, 3):
                             sample.stress = stress.unsqueeze(0)
-                            logging.info(f"Set stress pseudolabel with shape: {sample.stress.shape}")
                 
                 # Virials pseudolabel - for multihead models
                 if 'virials' in out and out['virials'] is not None:
@@ -287,7 +271,6 @@ def get_pseudolabels(model, data_loader, device):
                         virials = virials_tensor[i, head_idx]
                         if virials.shape == (3, 3):
                             sample.virials = virials.unsqueeze(0)
-                            logging.info(f"Set virials pseudolabel with shape: {sample.virials.shape}")
                 
                 # Dipole pseudolabel - for multihead models
                 if 'dipole' in out and out['dipole'] is not None:
@@ -296,7 +279,6 @@ def get_pseudolabels(model, data_loader, device):
                         dipole = dipole_tensor[i, head_idx]
                         if dipole.shape == (3,):
                             sample.dipole = dipole.unsqueeze(0)
-                            logging.info(f"Set dipole pseudolabel with shape: {sample.dipole.shape}")
                 
                 # Charges pseudolabel - for multihead models
                 if 'charges' in out and out['charges'] is not None:
@@ -306,19 +288,12 @@ def get_pseudolabels(model, data_loader, device):
                         charges = charges_tensor[head_idx, atoms_indices]
                         if charges.shape[0] == sample.positions.shape[0]:
                             sample.charges = charges
-                            logging.info(f"Set charges pseudolabel with shape: {sample.charges.shape}")
                 
                 # Add to our collection
-                logging.info(f"Adding sample {i} to pseudolabeled samples")
-                try:
-                    cpu_sample = sample.to("cpu")
-                    samples_with_pseudolabels.append(cpu_sample)
-                    logging.info(f"Successfully added sample {i} to pseudolabeled samples")
-                except Exception as e:
-                    logging.error(f"Error converting sample to CPU: {str(e)}")
+                samples_with_pseudolabels.append(sample.to("cpu"))
                 
         except RuntimeError as e:
-            logging.error(f"Error in model forward pass: {str(e)}")
+            logging.error(f"Error generating pseudolabels: {str(e)}")
             continue
     
     # Restore original requires_grad settings for model parameters
@@ -330,10 +305,6 @@ def get_pseudolabels(model, data_loader, device):
 
 def apply_pseudolabels(dataset, pseudolabels):
     """Replace the dataset with pseudolabeled data."""
-    logging.info(f"apply_pseudolabels called with dataset length: {len(dataset)} and pseudolabels length: {len(pseudolabels)}")
-    logging.info(f"Dataset type: {type(dataset)} and first item type: {type(dataset[0]) if len(dataset) > 0 else 'none'}")
-    logging.info(f"Pseudolabels type: {type(pseudolabels)} and first item type: {type(pseudolabels[0]) if len(pseudolabels) > 0 else 'none'}")
-    
     if len(pseudolabels) == 0:
         logging.warning("No pseudolabels generated. Continuing with original dataset.")
         return dataset
