@@ -216,136 +216,122 @@ def generate_pseudolabels_for_configs(model, configs, z_table, r_max, device, ba
     Returns:
         List of Configuration objects with updated properties
     """
-    import torch
+  
     import logging
-    import copy
-    import numpy as np
-    from tqdm import tqdm
-    import traceback
+    from copy import deepcopy
+    from mace import data
+    from mace.tools import torch_geometric
     
     if not configs:
         return []
     
-    # Ensure model is in eval mode
     model.eval()
-    
-    # Create batches of configurations
-    batches = [configs[i:i + batch_size] for i in range(0, len(configs), batch_size)]
-    logging.info(f"Processing {len(configs)} configurations in {len(batches)} batches")
-    
     updated_configs = []
     
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(batches, desc="Generating pseudolabels")):
-            try:
-                batch_inputs = []
-                valid_configs = []  # Track which configs were successfully converted to AtomicData
-                
-                # Create AtomicData objects for each configuration
-                for config in batch:
-                    try:
-                        from mace.data import AtomicData
-                        data = AtomicData.from_config(config, z_table=z_table, cutoff=r_max)
-                        batch_inputs.append(data)
-                        valid_configs.append(config)
-                    except Exception as e:
-                        logging.warning(f"Failed to create AtomicData for configuration: {str(e)}")
-                        # Add the original config to the results without pseudolabels
-                        updated_configs.append(copy.deepcopy(config))
-                
-                if not batch_inputs:
-                    logging.warning(f"No valid inputs in batch {batch_idx+1}, skipping")
-                    continue
-                
-                # Collate batch and move to device
-                try:
-                    from torch_geometric.data import Batch
-                    collated_batch = Batch.from_data_list(batch_inputs).to(device)
-                except Exception as e:
-                    logging.error(f"Failed to collate batch: {str(e)}")
-                    # Add the original configs to the results without pseudolabels
-                    updated_configs.extend([copy.deepcopy(config) for config in valid_configs])
-                    continue
-                
-                # Get model predictions
-                try:
-                    outputs = model(collated_batch)
-                except Exception as e:
-                    logging.error(f"Model forward pass failed: {str(e)}")
-                    # Add the original configs to the results without pseudolabels
-                    updated_configs.extend([copy.deepcopy(config) for config in valid_configs])
-                    continue
-                
-                # Verify model outputs contain expected fields
-                if "energy" not in outputs or "forces" not in outputs:
-                    logging.error(f"Model outputs missing required fields. Available keys: {outputs.keys()}")
-                    updated_configs.extend([copy.deepcopy(config) for config in valid_configs])
-                    continue
-                
-                # Extract predictions
-                energies = outputs["energy"].cpu().numpy()
-                forces = outputs["forces"].cpu().numpy()
-                
-                # Split forces by structure
-                forces_by_structure = []
-                start_idx = 0
-                for config in valid_configs:
-                    num_atoms = len(config.atomic_numbers)
-                    forces_by_structure.append(forces[start_idx:start_idx + num_atoms])
-                    start_idx += num_atoms
-                
-                # Update configurations with pseudolabels
-                for i, config in enumerate(valid_configs):
-                    # Create a deep copy of the configuration
-                    new_config = copy.deepcopy(config)
-                    
-                    # Check if the config uses a properties dictionary or direct attributes
-                    has_properties_dict = hasattr(new_config, 'properties') and isinstance(new_config.properties, dict)
-                    
-                    # Store original values if they exist
-                    if has_properties_dict:
-                        # For configurations using properties dictionary
-                        if 'energy' in new_config.properties:
-                            if not hasattr(new_config, 'original_properties'):
-                                new_config.original_properties = {}
-                            new_config.original_properties['energy'] = new_config.properties['energy']
-                        
-                        if 'forces' in new_config.properties:
-                            if not hasattr(new_config, 'original_properties'):
-                                new_config.original_properties = {}
-                            new_config.original_properties['forces'] = copy.deepcopy(new_config.properties['forces'])
-                        
-                        # Set new pseudolabels
-                        new_config.properties['energy'] = float(energies[i])
-                        new_config.properties['forces'] = forces_by_structure[i]
-                    else:
-                        # For configurations using direct attributes
-                        if hasattr(new_config, 'energy') and new_config.energy is not None:
-                            new_config.original_energy = new_config.energy
-                        if hasattr(new_config, 'forces') and new_config.forces is not None:
-                            new_config.original_forces = copy.deepcopy(new_config.forces)
-                        
-                        # Set new pseudolabels
-                        new_config.energy = float(energies[i])
-                        new_config.forces = forces_by_structure[i]
-                    
-                    updated_configs.append(new_config)
-            
-            except Exception as e:
-                logging.error(f"Error in batch {batch_idx+1}: {str(e)}")
-                logging.debug(traceback.format_exc())
-                # Add the original configs to the results without pseudolabels
-                updated_configs.extend([copy.deepcopy(config) for config in batch])
+    # Disable gradient tracking for model parameters
+    original_requires_grad = {}
+    for param in model.parameters():
+        original_requires_grad[param] = param.requires_grad
+        param.requires_grad = False
     
-    # Ensure we have the same number of configurations as input
-    if len(updated_configs) != len(configs):
-        logging.warning(f"Number of output configurations ({len(updated_configs)}) doesn't match input ({len(configs)})")
-        # Fill in any missing configs
-        if len(updated_configs) < len(configs):
-            config_ids = {id(config) for config in updated_configs}
-            for config in configs:
-                if id(config) not in config_ids:
-                    updated_configs.append(copy.deepcopy(config))
+    # Get the index of pt_head if available
+    try:
+        head_idx = model.heads.index("pt_head")
+        logging.info(f"Found 'pt_head' at index {head_idx} for pseudolabeling")
+    except (ValueError, AttributeError):
+        head_idx = 0
+        logging.warning("Could not find 'pt_head', using index 0 instead for pseudolabeling")
+    
+    # Process configs in batches to avoid memory issues
+    for i in range(0, len(configs), batch_size):
+        batch_configs = configs[i:i+batch_size]
+        
+        try:
+            # Create temporary AtomicData objects for this batch
+            batch_data = [
+                data.AtomicData.from_config(
+                    config, z_table=z_table, cutoff=r_max
+                ) for config in batch_configs
+            ]
+            
+            # Create a batch for model inference
+            batch = torch_geometric.data.Batch.from_data_list(batch_data).to(device)
+            batch_dict = batch.to_dict()
+            
+            # Run model inference with computation of all properties
+            out = model(
+                batch_dict, 
+                training=False,
+                compute_force=True,
+                compute_virials=True,
+                compute_stress=True
+            )
+            
+            # Process each configuration in the batch
+            for j, config in enumerate(batch_configs):
+                # Create a deep copy to avoid modifying the original
+                config_copy = deepcopy(config)
+                
+                # Ensure properties dict exists
+                if not hasattr(config_copy, 'properties'):
+                    config_copy.properties = {}
+                
+                # Update config properties with pseudolabels
+                if 'energy' in out and out['energy'] is not None:
+                    if out['energy'].dim() > 1:  # Multiple heads
+                        config_copy.properties['energy'] = out['energy'][j, head_idx].detach().cpu().item()
+                    else:
+                        config_copy.properties['energy'] = out['energy'][j].detach().cpu().item()
+                
+                if 'forces' in out and out['forces'] is not None:
+                    # Extract forces for this configuration
+                    node_start = batch.ptr[j].item()
+                    node_end = batch.ptr[j+1].item()
+                    
+                    if out['forces'].dim() > 2:  # Multiple heads
+                        config_copy.properties['forces'] = out['forces'][node_start:node_end, head_idx].detach().cpu().numpy()
+                    else:
+                        config_copy.properties['forces'] = out['forces'][node_start:node_end].detach().cpu().numpy()
+                
+                # Add other property updates
+                if 'stress' in out and out['stress'] is not None:
+                    if out['stress'].dim() == 4:  # [batch, heads, 3, 3]
+                        config_copy.properties['stress'] = out['stress'][j, head_idx].detach().cpu().numpy()
+                    else:
+                        config_copy.properties['stress'] = out['stress'][j].detach().cpu().numpy()
+                
+                if 'virials' in out and out['virials'] is not None:
+                    if out['virials'].dim() == 4:  # [batch, heads, 3, 3]
+                        config_copy.properties['virials'] = out['virials'][j, head_idx].detach().cpu().numpy()
+                    else:
+                        config_copy.properties['virials'] = out['virials'][j].detach().cpu().numpy()
+                        
+                if 'dipole' in out and out['dipole'] is not None:
+                    if out['dipole'].dim() == 3:  # [batch, heads, 3]
+                        config_copy.properties['dipole'] = out['dipole'][j, head_idx].detach().cpu().numpy()
+                    else:
+                        config_copy.properties['dipole'] = out['dipole'][j].detach().cpu().numpy()
+                
+                if 'charges' in out and out['charges'] is not None:
+                    # Charges are per atom
+                    node_start = batch.ptr[j].item()
+                    node_end = batch.ptr[j+1].item()
+                    
+                    if out['charges'].dim() > 1:  # Multiple heads
+                        config_copy.properties['charges'] = out['charges'][head_idx, node_start:node_end].detach().cpu().numpy()
+                    else:
+                        config_copy.properties['charges'] = out['charges'][node_start:node_end].detach().cpu().numpy()
+                        
+                updated_configs.append(config_copy)
+                
+        except Exception as e:
+            logging.error(f"Error generating pseudolabels for batch {i//batch_size + 1}: {str(e)}")
+            # On error, return the original configs for this batch
+            updated_configs.extend([deepcopy(config) for config in batch_configs])
+    
+    # Restore original requires_grad settings
+    for param, requires_grad in original_requires_grad.items():
+        param.requires_grad = requires_grad
     
     logging.info(f"Generated pseudolabels for {len(updated_configs)} configurations")
     return updated_configs
