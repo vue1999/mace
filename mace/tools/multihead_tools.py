@@ -255,7 +255,7 @@ def generate_pseudolabels_for_configs(model, configs, z_table, r_max, device, ba
             ]
             
             # Create a batch for model inference
-            batch = torch_geometric.data.Batch.from_data_list(batch_data).to(device)
+            batch = torch_geometric.Batch.from_data_list(batch_data).to(device)
             batch_dict = batch.to_dict()
             
             # Run model inference with computation of all properties
