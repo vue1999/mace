@@ -4,9 +4,9 @@ import dataclasses
 import logging
 import os
 import urllib.request
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-from copy import deepcopy
 
 import torch
 
@@ -16,14 +16,10 @@ from mace.cli.fine_tuning_select import (
     SubselectType,
     select_samples,
 )
-from mace.data import KeySpecification
+from mace.data import KeySpecification, AtomicData
 from mace.data.utils import Configuration
-from mace.tools.scripts_utils import SubsetCollection, get_dataset_from_xyz
-
-import logging
-from copy import deepcopy
-from mace import data
 from mace.tools import torch_geometric
+from mace.tools.scripts_utils import SubsetCollection, get_dataset_from_xyz
 from mace.tools.utils import AtomicNumberTable
 
 
@@ -247,7 +243,7 @@ def generate_pseudolabels_for_configs(
         try:
             # Create temporary AtomicData objects for this batch
             batch_data = [
-                data.AtomicData.from_config(
+                AtomicData.from_config(
                     config, z_table=z_table, cutoff=r_max
                 ) for config in batch_configs
             ]
