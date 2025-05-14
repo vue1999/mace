@@ -335,7 +335,6 @@ def apply_pseudolabels_to_pt_head_configs(
         
         # Use foundation model's z_table if available
         if hasattr(foundation_model, 'atomic_numbers'):
-            from mace.tools.utils import AtomicNumberTable
             z_table = AtomicNumberTable(sorted(foundation_model.atomic_numbers.tolist()))
             logging.info(f"Using foundation model's atomic numbers for pseudolabeling: {z_table.zs}")
         elif hasattr(pt_head_config, 'z_table') and pt_head_config.z_table is not None:
