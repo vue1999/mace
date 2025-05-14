@@ -17,7 +17,14 @@ from mace.cli.fine_tuning_select import (
     select_samples,
 )
 from mace.data import KeySpecification
+from mace.data.utils import Configuration
 from mace.tools.scripts_utils import SubsetCollection, get_dataset_from_xyz
+
+import logging
+from copy import deepcopy
+from mace import data
+from mace.tools import torch_geometric
+from mace.tools.utils import AtomicNumberTable
 
 
 @dataclasses.dataclass
@@ -201,7 +208,14 @@ def assemble_mp_data(
         ) from exc
 
 
-def generate_pseudolabels_for_configs(model, configs, z_table, r_max, device, batch_size=32):
+def generate_pseudolabels_for_configs(
+    model: torch.nn.Module,
+    configs: List[Configuration],
+    z_table: AtomicNumberTable,
+    r_max: float,
+    device: torch.device,
+    batch_size: int
+) -> List[Configuration]:
     """
     Generate pseudolabels for a list of Configuration objects.
     
@@ -216,14 +230,6 @@ def generate_pseudolabels_for_configs(model, configs, z_table, r_max, device, ba
     Returns:
         List of Configuration objects with updated properties
     """
-  
-    import logging
-    from copy import deepcopy
-    from mace import data
-    from mace.tools import torch_geometric
-    
-    if not configs:
-        return []
     
     model.eval()
     updated_configs = []
@@ -234,15 +240,7 @@ def generate_pseudolabels_for_configs(model, configs, z_table, r_max, device, ba
         original_requires_grad[param] = param.requires_grad
         param.requires_grad = False
     
-    # Get the index of pt_head if available
-    try:
-        head_idx = model.heads.index("pt_head")
-        logging.info(f"Found 'pt_head' at index {head_idx} for pseudolabeling")
-    except (ValueError, AttributeError):
-        head_idx = 0
-        logging.warning("Could not find 'pt_head', using index 0 instead for pseudolabeling")
-    
-    # Process configs in batches to avoid memory issues
+    # Process configs in batches
     for i in range(0, len(configs), batch_size):
         batch_configs = configs[i:i+batch_size]
         
@@ -269,7 +267,7 @@ def generate_pseudolabels_for_configs(model, configs, z_table, r_max, device, ba
             
             # Process each configuration in the batch
             for j, config in enumerate(batch_configs):
-                # Create a deep copy to avoid modifying the original
+                # Create a deepcopy to avoid modifying the original
                 config_copy = deepcopy(config)
                 
                 # Ensure properties dict exists
@@ -278,49 +276,25 @@ def generate_pseudolabels_for_configs(model, configs, z_table, r_max, device, ba
                 
                 # Update config properties with pseudolabels
                 if 'energy' in out and out['energy'] is not None:
-                    if out['energy'].dim() > 1:  # Multiple heads
-                        config_copy.properties['energy'] = out['energy'][j, head_idx].detach().cpu().item()
-                    else:
-                        config_copy.properties['energy'] = out['energy'][j].detach().cpu().item()
-                
+                    config_copy.properties['energy'] = out['energy'][j].detach().cpu().item()
                 if 'forces' in out and out['forces'] is not None:
-                    # Extract forces for this configuration
+                    # Forces are per atom
                     node_start = batch.ptr[j].item()
                     node_end = batch.ptr[j+1].item()
                     
-                    if out['forces'].dim() > 2:  # Multiple heads
-                        config_copy.properties['forces'] = out['forces'][node_start:node_end, head_idx].detach().cpu().numpy()
-                    else:
-                        config_copy.properties['forces'] = out['forces'][node_start:node_end].detach().cpu().numpy()
-                
-                # Add other property updates
+                    config_copy.properties['forces'] = out['forces'][node_start:node_end].detach().cpu().numpy()
                 if 'stress' in out and out['stress'] is not None:
-                    if out['stress'].dim() == 4:  # [batch, heads, 3, 3]
-                        config_copy.properties['stress'] = out['stress'][j, head_idx].detach().cpu().numpy()
-                    else:
-                        config_copy.properties['stress'] = out['stress'][j].detach().cpu().numpy()
-                
+                    config_copy.properties['stress'] = out['stress'][j].detach().cpu().numpy()
                 if 'virials' in out and out['virials'] is not None:
-                    if out['virials'].dim() == 4:  # [batch, heads, 3, 3]
-                        config_copy.properties['virials'] = out['virials'][j, head_idx].detach().cpu().numpy()
-                    else:
-                        config_copy.properties['virials'] = out['virials'][j].detach().cpu().numpy()
-                        
+                    config_copy.properties['virials'] = out['virials'][j].detach().cpu().numpy()
                 if 'dipole' in out and out['dipole'] is not None:
-                    if out['dipole'].dim() == 3:  # [batch, heads, 3]
-                        config_copy.properties['dipole'] = out['dipole'][j, head_idx].detach().cpu().numpy()
-                    else:
-                        config_copy.properties['dipole'] = out['dipole'][j].detach().cpu().numpy()
-                
+                    config_copy.properties['dipole'] = out['dipole'][j].detach().cpu().numpy()
                 if 'charges' in out and out['charges'] is not None:
                     # Charges are per atom
                     node_start = batch.ptr[j].item()
                     node_end = batch.ptr[j+1].item()
-                    
-                    if out['charges'].dim() > 1:  # Multiple heads
-                        config_copy.properties['charges'] = out['charges'][head_idx, node_start:node_end].detach().cpu().numpy()
-                    else:
-                        config_copy.properties['charges'] = out['charges'][node_start:node_end].detach().cpu().numpy()
+
+                    config_copy.properties['charges'] = out['charges'][node_start:node_end].detach().cpu().numpy()
                         
                 updated_configs.append(config_copy)
                 
@@ -338,12 +312,12 @@ def generate_pseudolabels_for_configs(model, configs, z_table, r_max, device, ba
 
 
 def apply_pseudolabels_to_pt_head_configs(
-    foundation_model, 
-    pt_head_config, 
-    r_max, 
-    device, 
-    batch_size=32
-):
+    foundation_model: torch.nn.Module,
+    pt_head_config: HeadConfig, 
+    r_max: float, 
+    device: torch.device, 
+    batch_size: int
+) -> bool:
     """
     Apply pseudolabels to pt_head configurations using the foundation model.
     
@@ -357,24 +331,10 @@ def apply_pseudolabels_to_pt_head_configs(
     Returns:
         bool: True if pseudolabeling was successful, False otherwise
     """
-    import logging
-    
-    if foundation_model is None:
-        logging.warning("No foundation model provided. Skipping pseudolabeling.")
-        return False
-        
-    if pt_head_config is None:
-        logging.warning("No pt_head configuration found. Skipping pseudolabeling.")
-        return False
-        
-    if not hasattr(pt_head_config, 'collections') or not pt_head_config.collections:
-        logging.warning("No collections found in pt_head config. Skipping pseudolabeling.")
-        return False
     
     try:
         logging.info("Applying pseudolabels to pt_head configurations using foundation model")
-        
-        # Move foundation model to the correct device
+
         foundation_model.to(device)
         
         # Use foundation model's z_table if available
