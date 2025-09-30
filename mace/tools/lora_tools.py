@@ -1,146 +1,181 @@
 from e3nn import o3
+from e3nn.nn._fc import _Layer as E3NNFCLayer  
 import torch
 import torch.nn as nn
 
-def inject_LinLoRAs(model: nn.Module, rank: int = 4, alpha: int = 1):
+
+def build_lora_irreps(irreps_in: o3.Irreps, irreps_out: o3.Irreps, rank: int) -> o3.Irreps:
     """
-    Inject Low-Rank Adaptation (LoRA) layers into the given model.
-    
-    Args:
-        model (nn.Module): The neural network model to modify.
-        rank (int): The rank for the LoRA layers.
-        alpha (int): Scaling factor for the LoRA layers.
+    Choose an equivariant bottleneck irreps that preserves symmetry: for every irrep
+    present in BOTH input and output, allocate `rank` copies.
     """
-
-    for child_name, child in list(model.named_children()): 
-        if isinstance(child, LoRALinear):
-            continue
-        if isinstance(child, o3.Linear):
-            print(f"Input features: {child.irreps_in}")  
-            print(f"Output features: {child.irreps_out}") 
-            print(f"Injecting LoRA into module: {child_name}")
-            setattr(model, child_name, LoRALinear(child, rank=rank, alpha=alpha))
-        else:
-            inject_LoRAs(child, rank=rank, alpha=alpha)
-    return model
-
-def inject_LoRAs(model: nn.Module, rank: int = 4, alpha: int = 1):
-    """
-    Inject Low-Rank Adaptation (LoRA) layers into the given model.
-    
-    Args:
-        model (nn.Module): The neural network model to modify.
-        rank (int): The rank for the LoRA layers.
-        alpha (int): Scaling factor for the LoRA layers.
-    """
-
-    for child_name, child in list(model.named_children()): 
-        if isinstance(child, LoRAEquivariantLayer):
-            continue
-        if hasattr(child, "irreps_in") and hasattr(child, "irreps_out") and hasattr(child, "weight"):    #what are the layers that dont trigger?        
-            print(f"Input features: {child.irreps_in}")  
-            print(f"Output features: {child.irreps_out}") 
-            print(f"Injecting LoRA into module: {child_name}")
-            setattr(model, child_name, LoRAEquivariantLayer(child, rank=rank, alpha=alpha))
-        else:
-            inject_LoRAs(child, rank=rank, alpha=alpha)
-    return model
-
-class LoRAEquivariantLayer(nn.Module):
-    original_layer: o3.Irreps
-    lora_A: o3.Irreps
-    lora_B: o3.Irreps
-    irreps_in: o3.Irreps
-    irreps_out: o3.Irreps
-    lora_irreps: o3.Irreps
-    scaling: float
-    rank: int
-    alpha: float
-
-    def __init__(self, original_layer:o3.Irreps, rank=4, alpha=1):
-        super().__init__()
-        self.rank = rank
-        self.alpha = alpha
-        self.scaling = alpha / rank
-
-
-        self.irreps_in = original_layer.irreps_in
-        self.irreps_out = original_layer.irreps_out
-        self.original_layer = original_layer
-        self.original_layer.requires_grad_(False)
-        self.lora_irreps = build_lora_irreps(original_layer.irreps_in, original_layer.irreps_out, rank)
-        layer_type = type(original_layer)
-        # LoRA layers
-        self.lora_A = layer_type(self.irreps_in, self.lora_irreps, internal_weights=True)
-        self.lora_B = layer_type(self.lora_irreps, self.irreps_out, internal_weights=True)
-        
-        # Initialize LoRA parameters to ensure ΔW starts at 0
-        with torch.no_grad():
-            for p in self.lora_B.parameters():
-                p.zero_()
-            for p in self.lora_A.parameters():
-                if p.dim() >= 2:
-                    p.normal_(mean=0.0, std=1e-3)  # Small std normal initialization
-
-    def forward(self, x):
-        delta = self.lora_B(self.lora_A(x))
-        return self.scaling * delta
-
-def build_lora_irreps(irreps_in: o3.Irreps,
-                      irreps_out: o3.Irreps,
-                      rank: int) -> o3.Irreps:
-    """
-    Construct internal bottleneck irreps: for every irrep type present in BOTH
-    input and output allocate `rank` copies. This keeps the LoRA update
-    strictly equivariant and avoids useless blocks.
-    """
-    in_set = {ir for _, ir in irreps_in}
-    out_set = {ir for _, ir in irreps_out}
+    in_set = {ir for _, ir in o3.Irreps(irreps_in)}
+    out_set = {ir for _, ir in o3.Irreps(irreps_out)}
     shared = sorted(in_set & out_set, key=lambda ir: (ir.l, ir.p))
     if not shared:
         raise ValueError(
-            f"No shared irreps between input ({irreps_in}) and output ({irreps_out}); "
-            "cannot build an equivariant linear LoRA bottleneck."
+            f"No shared irreps between input ({irreps_in}) and output ({irreps_out}); cannot build equivariant LoRA."
         )
     parts = [f"{rank}x{ir}" for ir in shared]
-    lora_irreps = o3.Irreps(" + ".join(parts))
-    return lora_irreps
+    return o3.Irreps(" + ".join(parts))
 
-class LoRALinear(nn.Module):
-    linear_layer: o3.Linear
-    lora_A: o3.Linear
-    lora_B: o3.Linear
-    irreps_in: o3.Irreps
-    irreps_out: o3.Irreps
-    lora_irreps: o3.Irreps
-    scaling: float
-    rank: int
-    alpha: float
 
-    def __init__(self, linear_layer: nn.Module, rank=4, alpha=1):
+class LoRAO3Linear(nn.Module):
+    """LoRA for equivariant o3.Linear-like layers (preserves O(3) equivariance)."""
+
+    def __init__(self, base_linear: o3.Linear, rank: int = 4, alpha: float = 1.0):
         super().__init__()
-        self.linear_layer = linear_layer
-        self.linear_layer.requires_grad_(False)
-        self.scaling = alpha / rank
-        self.lora_irreps = o3.Irreps(f"{rank}x0e")
-        self.irreps_in = linear_layer.irreps_in
-        self.irreps_out = linear_layer.irreps_out
-        # Create the trainable LoRA matrices
-        self.lora_A = o3.Linear(linear_layer.irreps_in, self.lora_irreps, internal_weights=True)
-        self.lora_B = o3.Linear(self.lora_irreps, linear_layer.irreps_out, internal_weights=True)
-        
-        # Initialize LoRA parameters, so ΔW starts at 0
+        self.base = base_linear
+        self.irreps_in = self.base.irreps_in
+        self.irreps_out = self.base.irreps_out
+        self.scaling = float(alpha) / float(rank)
+        self.lora_irreps = build_lora_irreps(self.irreps_in, self.irreps_out, rank)
+        # Use the same class as base to avoid layout mismatches if possible
+        layer_type = type(self.base)
+        self.lora_A = layer_type(
+            self.irreps_in, self.lora_irreps, internal_weights=True, biases=False
+        )
+        self.lora_B = layer_type(
+            self.lora_irreps, self.irreps_out, internal_weights=True, biases=False
+        )
+        # Match dtype/device to base
+        base_param = next(self.base.parameters())
+        self.lora_A.to(dtype=base_param.dtype, device=base_param.device)
+        self.lora_B.to(dtype=base_param.dtype, device=base_param.device)
+
         with torch.no_grad():
             for p in self.lora_B.parameters():
                 p.zero_()
-
-        with torch.no_grad():
             for p in self.lora_A.parameters():
                 if p.dim() >= 2:
-                    # small std normal (keeps update tiny)
                     p.normal_(mean=0.0, std=1e-3)
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        base = self.linear_layer(x)          
-        delta = self.lora_B(self.lora_A(x))  
+        base = self.base(x)
+        delta = self.lora_B(self.lora_A(x))
         return base + self.scaling * delta
+
+
+class LoRADenseLinear(nn.Module):
+    """LoRA for torch.nn.Linear"""
+
+    def __init__(self, base_linear: nn.Linear, rank: int = 4, alpha: float = 1.0):
+        super().__init__()
+        self.base = base_linear
+        in_f = self.base.in_features
+        out_f = self.base.out_features
+        self.scaling = float(alpha) / float(rank)
+        self.lora_A = nn.Linear(in_f, rank, bias=False)
+        self.lora_B = nn.Linear(rank, out_f, bias=False)
+
+        # match dtype/device to base
+        base_param = next(self.base.parameters())
+        self.lora_A.to(dtype=base_param.dtype, device=base_param.device)
+        self.lora_B.to(dtype=base_param.dtype, device=base_param.device)
+
+        with torch.no_grad():
+            nn.init.zeros_(self.lora_B.weight)
+            nn.init.normal_(self.lora_A.weight, mean=0.0, std=1e-3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base = self.base(x)
+        delta = self.lora_B(self.lora_A(x))
+        return base + self.scaling * delta
+
+
+class LoRAFCLayer(nn.Module):
+    """LoRA for e3nn.nn._fc._Layer used by FullyConnectedNet (scalar MLP).
+    Adds a low-rank delta on the weight matrix.
+    """
+
+    def __init__(self, base_layer: nn.Module, rank: int = 4, alpha: float = 1.0):
+        super().__init__()
+        if not hasattr(base_layer, "weight"):
+            raise TypeError("LoRAFCLayer requires a layer with a 'weight' parameter")
+        self.base = base_layer
+
+        w = self.base.weight  # type: ignore[attr-defined]
+        in_f, out_f = int(w.shape[0]), int(w.shape[1])
+        self.scaling = float(alpha) / float(rank)
+
+        # Use explicit parameters to match e3nn layout [in, out]
+        self.lora_A = nn.Parameter(torch.empty(in_f, rank, device=w.device, dtype=w.dtype))
+        self.lora_B = nn.Parameter(torch.empty(rank, out_f, device=w.device, dtype=w.dtype))
+        
+        with torch.no_grad():
+            torch.nn.init.normal_(self.lora_A, mean=0.0, std=1e-3)
+            torch.nn.init.zeros_(self.lora_B)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Replicate e3nn _Layer normalization 
+        W = self.base.weight  # type: ignore[attr-defined]
+        h_in = getattr(self.base, "h_in")
+        var_in = getattr(self.base, "var_in")
+        var_out = getattr(self.base, "var_out")
+        act = getattr(self.base, "act", None)
+
+        delta = self.lora_A @ self.lora_B
+        W_sum = W + self.scaling * delta
+
+        if act is not None:
+            denom = (h_in * var_in) ** 0.5
+            w = W_sum / denom
+            x = x @ w
+            x = act(x)
+            x = x * (var_out ** 0.5)
+        else:
+            denom = (h_in * var_in / var_out) ** 0.5
+            w = W_sum / denom
+            x = x @ w
+        return x
+
+
+def inject_lora(
+    module: nn.Module,
+    rank: int = 4,
+    alpha: float = 1.0,
+    wrap_equivariant: bool = True,
+    wrap_dense: bool = True,
+    _is_root: bool = True,
+) -> None:
+    """
+    Recursively replace eligible linears with LoRA-wrapped versions.
+    """
+
+    for child_name, child in list(module.named_children()):
+        # Skip already wrapped
+        if isinstance(child, (LoRAO3Linear, LoRADenseLinear, LoRAFCLayer)):
+            continue
+        # Equivariant o3.Linear
+        if wrap_equivariant and isinstance(child, o3.Linear):
+            try:
+                wrapped = LoRAO3Linear(child, rank=rank, alpha=alpha)
+            except Exception: # If no shared irreps, skip
+                continue
+            else:
+                module._modules[child_name] = wrapped
+        # Dense nn.Linear
+        if wrap_dense and isinstance(child, nn.Linear):
+            wrapped = LoRADenseLinear(child, rank=rank, alpha=alpha)
+            module._modules[child_name] = wrapped
+            continue
+        # e3nn FullyConnectedNet internal layer
+        if wrap_dense and isinstance(child, E3NNFCLayer):
+            wrapped = LoRAFCLayer(child, rank=rank, alpha=alpha)
+            module._modules[child_name] = wrapped
+            continue
+        # Recurse
+        inject_lora(child, rank, alpha, wrap_equivariant, wrap_dense, _is_root=False)
+
+    if _is_root:
+        for name, p in module.named_parameters():
+            if ("lora_A" in name) or ("lora_B" in name):
+                p.requires_grad = True
+            else:
+                p.requires_grad = False
+
+
+def inject_LoRAs(model: nn.Module, rank: int = 4, alpha: int = 1):
+    inject_lora(model, rank=rank, alpha=alpha, wrap_equivariant=True, wrap_dense=True)
+    return model
+    
