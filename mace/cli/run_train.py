@@ -689,6 +689,30 @@ def run(args) -> None:
     logging.debug(model)
     logging.info(f"Total number of parameters: {tools.count_parameters(model)}")
     logging.info("")
+    # =================================================================
+    # LORA
+    # =================================================================
+    
+    # Check for a command-line argument to enable LoRA
+    if args.lora: 
+        print("LoRA fine-tuning enabled.")
+        from mace.tools.lora_tools import inject_LoRAs
+
+        logging.info("Original model has {} trainable parameters.".format({tools.count_parameters(model)}))
+        LORA_RANK = 4 
+        LORA_ALPHA = 1.0
+        
+        logging.info(f"Injecting LoRA layers with rank={LORA_RANK} and alpha={LORA_ALPHA}")
+        model = inject_LoRAs(model, rank=LORA_RANK, alpha=LORA_ALPHA)
+
+        
+        logging.info("Model with LoRA has {} trainable parameters.".format({tools.count_parameters(model)}))
+
+    # =================================================================
+    # LORA
+    # =================================================================
+
+
     logging.info("===========OPTIMIZER INFORMATION===========")
     logging.info(f"Using {args.optimizer.upper()} as parameter optimizer")
     logging.info(f"Batch size: {args.batch_size}")
@@ -718,8 +742,18 @@ def run(args) -> None:
 
     # Optimizer
     param_options = get_params_options(args, model)
+
     optimizer: torch.optim.Optimizer
     optimizer = get_optimizer(args, param_options)
+    logging.info("=== Layer's learning rates ===")
+    for name, p in model.named_parameters():
+        st = optimizer.state.get(p, {})
+        if st:
+            logging.info(f"Param: {name}: {list(st.keys())}")
+
+    for i, param_group in enumerate(optimizer.param_groups):
+        logging.info(f"Param group {i}: lr = {param_group['lr']}")
+
     if args.device == "xpu":
         logging.info("Optimzing model and optimzier for XPU")
         model, optimizer = ipex.optimize(model, optimizer=optimizer)
@@ -766,9 +800,6 @@ def run(args) -> None:
     ema: Optional[ExponentialMovingAverage] = None
     if args.ema:
         ema = ExponentialMovingAverage(model.parameters(), decay=args.ema_decay)
-    else:
-        for group in optimizer.param_groups:
-            group["lr"] = args.lr
 
     if args.lbfgs:
         logging.info("Switching optimizer to LBFGS")

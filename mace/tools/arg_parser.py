@@ -534,7 +534,13 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str2bool,
         default=False,
     )
-
+    parser.add_argument(
+        "--lora",
+        help="Use Low-Rank Adaptation for the fine-tuning",
+        type=str2bool,
+        default=False,
+    )
+   
     # Keys
     parser.add_argument(
         "--energy_key",
@@ -737,13 +743,37 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         help="Optimizer for parameter optimization",
         type=str,
         default="adam",
-        choices=["adam", "adamw", "schedulefree"],
+        choices=["adam", "adamw", "schedulefree", "muon"],
     )
     parser.add_argument(
         "--beta",
         help="Beta parameter for the optimizer",
         type=float,
         default=0.9,
+    )
+    parser.add_argument(
+        "--muon_momentum",
+        help="Momentum coefficient for the Muon optimizer",
+        type=float,
+        default=0.95,
+    )
+    parser.add_argument(
+        "--muon_beta2",
+        help="Second beta for the Muon auxiliary Adam optimizer",
+        type=float,
+        default=0.95,
+    )
+    parser.add_argument(
+        "--muon_eps",
+        help="Epsilon value for the Muon auxiliary Adam optimizer",
+        type=float,
+        default=1e-10,
+    )
+    parser.add_argument(
+        "--muon_ns_steps",
+        help="Number of Newton-Schulz iterations for Muon",
+        type=int,
+        default=5,
     )
     parser.add_argument("--batch_size", help="batch size", type=int, default=10)
     parser.add_argument(
@@ -762,6 +792,18 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--weight_decay", help="weight decay (L2 penalty)", type=float, default=5e-7
+    )
+    parser.add_argument(
+        "--lr_params_factors",
+        help="Learning rate factors to multiply on the original lr",
+        type=str,
+        default='{"embedding_lr_factor": 1.0, "interactions_lr_factor": 1.0, "products_lr_factor": 1.0, "readouts_lr_factor": 1.0}',
+    )
+    parser.add_argument(
+        "--freeze",
+        help="Freeze layers from 1 to N. Can be positive or negative, e.g. -1 means the last layer is frozen. 0 or None means all layers are active and is a default setting",
+        type=int,
+        default=None,
     )
     parser.add_argument(
         "--amsgrad",
