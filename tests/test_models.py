@@ -180,6 +180,9 @@ def test_dipole_mace():
 
 
 def test_dipole_polar_mace():
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     # create dipole MACE model
     model_config = dict(
         r_max=5,
