@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Tuple
 import numpy as np
 import pytest
 import torch
+torch.set_default_dtype(torch.float64)
 
 from mace import data, modules, tools
 from e3nn import o3
